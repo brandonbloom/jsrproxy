@@ -16,5 +16,14 @@
    route. Wrangler builds and publishes `materializer/Dockerfile` as part of
    that deployment.
 
-The Container job runner and GitHub source materializer must be completed
-before this project can serve a newly observed repository revision.
+The public repository's `Deploy staging` GitHub Actions workflow runs on every
+push to `main`. Configure `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_API_TOKEN` as secrets in the GitHub `staging` environment before
+the first push. The API token must be allowed to deploy Workers, Durable
+Objects, R2 bindings, and Containers in that account. These credentials are
+not checked into the repository.
+
+The initial Container job runner materializes only repositories whose root
+configuration declares exports without requiring import-map rewriting. Full
+Deno publish-compatible graph walking and specifier rewriting remain to be
+implemented.

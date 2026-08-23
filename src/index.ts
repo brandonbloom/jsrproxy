@@ -1,7 +1,7 @@
 import { fingerprintPat, githubPat } from "./auth.ts";
 import { parseConfig } from "./config.ts";
 import { discoverGitHubBranches, GitHubBranchDiscoveryError } from "./github-branches.ts";
-import { decodeRepositoryName } from "./identity.ts";
+import { proxyableRepositoryName } from "./identity.ts";
 import { type R2BucketLike, serveArtifact } from "./r2-artifacts.ts";
 import { fallThrough, type ImmutableCache } from "./fallthrough.ts";
 import { parsePackageIdentity } from "./identity.ts";
@@ -16,6 +16,7 @@ export interface Env {
   AUTH_FINGERPRINT_SECRET?: string;
   ADMISSION?: DurableObjectNamespaceLike;
   PACKAGES?: DurableObjectNamespaceLike;
+  MATERIALIZER?: DurableObjectNamespaceLike;
   ARTIFACTS?: R2BucketLike;
 }
 
@@ -27,15 +28,18 @@ interface DurableObjectNamespaceLike {
 const worker = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const config = parseConfig(env.JSRPROXY_CONFIG);
-    const identity = parsePackageIdentity(new URL(request.url).pathname);
+    const url = new URL(request.url);
+    const identity = parsePackageIdentity(url.pathname);
+    const requestedScope = configuredScope(url.pathname, config.scopes);
+    if (requestedScope && !identity) return new Response("invalid package name", { status: 404 });
     if (identity && config.scopes.has(identity.scope)) {
       const pat = githubPat(request);
       if (!pat) return new Response("GitHub PAT required", { status: 401 });
       if (!env.AUTH_FINGERPRINT_SECRET || !env.ADMISSION || !env.PACKAGES) {
         return new Response("synthetic registry is not configured", { status: 503 });
       }
-      let repository: string;
-      try { repository = decodeRepositoryName(identity.name); } catch { return new Response("invalid package name", { status: 404 }); }
+      const repository = proxyableRepositoryName(identity.name);
+      if (!repository) return new Response("invalid package name", { status: 404 });
       const fingerprint = await fingerprintPat(env.AUTH_FINGERPRINT_SECRET, pat);
       const admission = await env.ADMISSION.get(env.ADMISSION.idFromName(fingerprint)).fetch(
         new Request("https://admission.internal/check", { method: "POST", body: JSON.stringify({ pat }) }),
@@ -48,10 +52,10 @@ const worker = {
       );
       if (!packageAuthorization.ok) return new Response("GitHub authorization unavailable", { status: 503, headers: packageAuthorization.headers });
       if (!(await packageAuthorization.json() as { granted?: boolean }).granted) return new Response("not found", { status: 404 });
-      if (isPackageMetadataPath(new URL(request.url).pathname)) {
-        return refreshPackageMetadata(env.PACKAGES, identity, scope.owner, repository, pat);
+      if (isPackageMetadataPath(url.pathname)) {
+        return refreshPackageMetadata(env.PACKAGES, identity, scope.owner, repository, pat, url.origin);
       }
-      const artifact = syntheticArtifactPath(new URL(request.url).pathname, identity);
+      const artifact = syntheticArtifactPath(url.pathname, identity);
       if (artifact && env.ARTIFACTS) return serveArtifact(env.ARTIFACTS, artifact.versionPrefix, artifact.key, request);
       return Response.json(
         { error: "synthetic registry materialization is not configured" },
@@ -62,6 +66,11 @@ const worker = {
     return fallThrough(request, fetch, edgeCache);
   },
 };
+
+function configuredScope<T>(pathname: string, scopes: ReadonlyMap<string, T>): string | undefined {
+  const match = /^\/@([a-z0-9][a-z0-9-]*)\//.exec(pathname);
+  return match && scopes.has(match[1]) ? match[1] : undefined;
+}
 
 function syntheticArtifactPath(pathname: string, identity: { scope: string; name: string }): { versionPrefix: string; key: string } | undefined {
   const segments = pathname.split("/");
@@ -82,6 +91,7 @@ async function refreshPackageMetadata(
   owner: string,
   repository: string,
   pat: string,
+  origin: string,
 ): Promise<Response> {
   let discovery;
   try {
@@ -105,11 +115,32 @@ async function refreshPackageMetadata(
     }),
   );
   if (!response.ok) return new Response("package registry unavailable", { status: 503, headers: response.headers });
-  const result = await response.json() as {
+  let result = await response.json() as {
     meta?: { scope: string; name: string; versions: Record<string, { yanked: boolean }> };
     jobs?: Array<{ state: string }>;
   };
   if (!result.meta || !result.jobs) return new Response("package registry returned an invalid response", { status: 502 });
+  if (result.jobs.some((job) => job.state === "pending")) {
+    const materialization = await packages.get(packages.idFromName(`@${identity.scope}/${identity.name}`)).fetch(
+      new Request("https://package.internal/materialize", {
+        method: "POST",
+        body: JSON.stringify({
+          owner,
+          repository,
+          pat,
+          statusUrl: `${origin}/-/status/@${identity.scope}/${identity.name}`,
+        }),
+      }),
+    );
+    if (!materialization.ok) {
+      return new Response("package materialization pending", {
+        status: 503,
+        headers: { "retry-after": materialization.headers.get("retry-after") ?? "1" },
+      });
+    }
+    result = await materialization.json() as typeof result;
+    if (!result.meta || !result.jobs) return new Response("package materialization returned an invalid response", { status: 502 });
+  }
   if (Object.keys(result.meta.versions).length === 0 && result.jobs.some((job) => job.state === "pending" || job.state === "leased")) {
     return new Response("package materialization pending", { status: 503, headers: { "retry-after": "1" } });
   }

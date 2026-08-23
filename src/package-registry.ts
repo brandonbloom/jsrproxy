@@ -12,6 +12,7 @@ export interface MaterializationJob {
   major: number;
   version: string;
   state: "pending" | "leased" | "ready" | "yanked";
+  leasedAt?: number;
   diagnostic?: TombstoneDiagnostic;
 }
 
@@ -20,6 +21,8 @@ export interface TombstoneDiagnostic {
   failureClass: string;
   message: string;
 }
+
+const MATERIALIZATION_LEASE_TIMEOUT_MS = 120_000;
 
 interface VersionRecord extends MaterializationJob {
   assignment: VersionAssignment;
@@ -116,13 +119,40 @@ export class PackageRegistry {
   markReady(version: string): void {
     const record = this.#requirePending(version);
     record.state = "ready";
+    delete record.leasedAt;
   }
 
   /** Publishes an irreversible yanked tombstone for a deterministic source failure. */
   markYanked(version: string, diagnostic: TombstoneDiagnostic): void {
     const record = this.#requirePending(version);
     record.state = "yanked";
+    delete record.leasedAt;
     record.diagnostic = { ...diagnostic };
+  }
+
+  /** Leases the next pending or expired job so only one Container can materialize it. */
+  leaseNext(now = Date.now()): MaterializationJob | undefined {
+    const record = [...this.#versions.values()]
+      .filter((candidate) => candidate.state === "pending" || (
+        candidate.state === "leased" && (
+          candidate.leasedAt === undefined ||
+          candidate.leasedAt + MATERIALIZATION_LEASE_TIMEOUT_MS <= now
+        )
+      ))
+      .sort((left, right) => left.version.localeCompare(right.version))[0];
+    if (!record) return undefined;
+    record.state = "leased";
+    record.leasedAt = now;
+    return copyJob(record);
+  }
+
+  /** Returns a failed or interrupted lease to the pending queue. */
+  releaseLease(version: string): void {
+    const record = this.#versions.get(version);
+    if (!record) throw new Error(`unknown version: ${version}`);
+    if (record.state !== "leased") throw new Error(`version ${version} is not leased`);
+    record.state = "pending";
+    delete record.leasedAt;
   }
 
   /** Returns only concrete versions that are safe for a client to resolve. */
@@ -158,6 +188,7 @@ function copyJob(record: VersionRecord): MaterializationJob {
     major: record.major,
     version: record.version,
     state: record.state,
+    leasedAt: record.leasedAt,
     diagnostic: record.diagnostic && { ...record.diagnostic },
   };
 }

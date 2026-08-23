@@ -64,4 +64,21 @@ describe("package registry state", () => {
     registry.markReady("0.1.100");
     assert.throws(() => registry.markYanked("0.1.100", { id: "x", failureClass: "x", message: "x" }));
   });
+
+  test("releases failed work and recovers an expired lease", () => {
+    const registry = new PackageRegistry({ scope: "acme", name: "widget" });
+    registry.refresh(discovery("first", 100));
+    const job = registry.leaseNext(1_000);
+    assert.equal(job?.state, "leased");
+    assert.equal(job?.leasedAt, 1_000);
+    assert.equal(registry.leaseNext(1_001), undefined);
+    registry.releaseLease("0.1.100");
+    assert.equal(registry.jobs()[0]?.state, "pending");
+    assert.equal(registry.jobs()[0]?.leasedAt, undefined);
+
+    registry.leaseNext(2_000);
+    const recovered = registry.leaseNext(122_000);
+    assert.equal(recovered?.state, "leased");
+    assert.equal(recovered?.leasedAt, 122_000);
+  });
 });

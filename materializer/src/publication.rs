@@ -194,7 +194,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::{PackageIdentity, SecretString};
+    use crate::job::{PackageIdentity, SecretString, SourceRepository};
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -306,6 +306,11 @@ mod tests {
         let request = crate::job::MaterializationRequest {
             job: job(),
             github_pat: SecretString::new("github_pat_secret"),
+            source: SourceRepository {
+                owner: "acme".into(),
+                repository: "widget".into(),
+            },
+            status_url: "https://proxy.invalid/-/status/@acme/widget".into(),
         };
         assert!(!format!("{request:?}").contains("github_pat_secret"));
     }

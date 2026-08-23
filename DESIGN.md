@@ -158,7 +158,7 @@ authorization results are cached with short TTLs.
 ## 5. Namespace
 
 ```
-@<scope>/<encoded-repo>  -> <configured-owner>/<decoded-repo>
+@<scope>/<repository>  -> <configured-owner>/<repository>
 ```
 
 For the configuration above:
@@ -204,22 +204,18 @@ resolution behavior absent from the materialized package.
 There is no branch component in the package name. The default branch and every
 `vN` branch contribute different majors to the same package's version list.
 
-GitHub repository names are case-insensitive, so the canonical source name is
-lowercase. Encode that name reversibly into JSR's lowercase alphanumeric and
-hyphen alphabet:
+GitHub repository names are case-insensitive, so the package identity is the
+repository name lowercased without escaping. A repository is proxyable only
+when that name matches `^[a-z0-9][a-z0-9-]*$`, is 2–58 characters long, and has
+no `--` sequence. Thus `MyLib` is served as `mylib`, while `three.js`,
+`my_lib`, one-character names, and names longer than 58 characters are not
+proxyable. The length limit keeps every synthetic identity publishable to
+jsr.io.
 
-- `[a-z0-9]` is literal.
-- `-` becomes `--`.
-- Every other UTF-8 byte becomes `-xhh`, where `hh` is lowercase hexadecimal.
-
-For example, `foo-bar` becomes `foo--bar`, and `my_repo.v2` becomes
-`my-x5frepo-x2ev2`. The decoder rejects malformed and non-canonical encodings.
-This avoids aliases and collisions without maintaining a registration table.
-
-The jsr.io service documents shorter scope and package limits than GitHub. Deno
-2.9.5 does not enforce those service limits before fetching from a custom
-registry. `jsrproxy` permits longer encoded names when necessary; such names are
-custom-registry identities and may not be publishable to jsr.io.
+The reserved `--` sequence keeps a future escaped-name tier unambiguous. If
+support for otherwise invalid repository names becomes necessary, it can use a
+marked escaped form such as `x--` without reinterpreting a live pass-through
+identity.
 
 ## 6. Branches and Versions
 

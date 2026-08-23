@@ -1,9 +1,11 @@
 //! Container process entry point.
 //!
-//! The HTTP job listener is introduced together with the GitHub source fetcher
-//! so the PAT can travel from the Durable Object to the fetcher without ever
-//! being serialized to durable storage or logs.
+//! The request body is the only path by which a caller PAT reaches the process.
+//! It is never persisted or written to stdout/stderr.
 
 fn main() {
-    eprintln!("jsrproxy-materializer requires a configured job listener");
+    if let Err(error) = jsrproxy_materializer::service::serve() {
+        eprintln!("jsrproxy materializer failed to listen: {error}");
+        std::process::exit(1);
+    }
 }

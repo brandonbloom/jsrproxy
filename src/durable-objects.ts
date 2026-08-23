@@ -16,6 +16,15 @@ interface AdmissionEnvironment {
   JSRPROXY_CONFIG?: string;
 }
 
+interface MaterializerNamespace {
+  idFromName(name: string): unknown;
+  get(id: unknown): { fetch(request: Request): Promise<Response> };
+}
+
+interface PackageEnvironment {
+  MATERIALIZER?: MaterializerNamespace;
+}
+
 interface AdmissionRecord {
   granted: boolean;
   expiresAt: number;
@@ -69,15 +78,18 @@ export class AdmissionDurableObject {
 
 export class PackageDurableObject {
   private readonly state: DurableState;
+  private readonly env: PackageEnvironment;
 
-  constructor(state: DurableState) {
+  constructor(state: DurableState, env: PackageEnvironment = {}) {
     this.state = state;
+    this.env = env;
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/authorize") return this.#authorize(request);
     if (request.method === "POST" && url.pathname === "/refresh") return this.#refresh(request);
+    if (request.method === "POST" && url.pathname === "/materialize") return this.#materialize(request);
     if (request.method === "POST" && url.pathname === "/complete") return this.#complete(request);
     if (request.method === "GET" && url.pathname === "/metadata") return this.#metadata();
     if (request.method === "GET" && url.pathname === "/status") return this.#status();
@@ -100,8 +112,15 @@ export class PackageDurableObject {
     if (result.kind === "unavailable") {
       return Response.json(result, { status: 503, headers: result.retryAfterSeconds ? { "retry-after": String(Math.ceil(result.retryAfterSeconds)) } : undefined });
     }
-    await this.state.storage.put(key, result.decision);
-    return Response.json(result.decision);
+    let decision = result.decision;
+    if (decision.granted) {
+      const repository = await github.json().catch(() => undefined) as { name?: unknown } | undefined;
+      if (typeof repository?.name !== "string" || repository.name.toLowerCase() !== body.repository) {
+        decision = { ...decision, granted: false };
+      }
+    }
+    await this.state.storage.put(key, decision);
+    return Response.json(decision);
   }
 
   async #refresh(request: Request): Promise<Response> {
@@ -135,6 +154,81 @@ export class PackageDurableObject {
     }
     await this.state.storage.put("registry", registry.snapshot());
     return Response.json(registry.meta());
+  }
+
+  async #materialize(request: Request): Promise<Response> {
+    const body = await request.json().catch(() => undefined) as {
+      owner?: unknown; repository?: unknown; pat?: unknown; statusUrl?: unknown;
+    } | undefined;
+    if (
+      typeof body?.owner !== "string" || body.owner.length === 0 ||
+      typeof body.repository !== "string" || body.repository.length === 0 ||
+      typeof body.pat !== "string" || body.pat.length === 0 ||
+      typeof body.statusUrl !== "string" || body.statusUrl.length === 0
+    ) {
+      return new Response("invalid materialization request", { status: 400 });
+    }
+    if (!this.env.MATERIALIZER) return new Response("materializer is not configured", { status: 503 });
+
+    const registry = await this.#registry();
+    const job = registry.leaseNext();
+    if (!job) return Response.json({ meta: registry.meta(), jobs: registry.jobs() });
+    await this.state.storage.put("registry", registry.snapshot());
+
+    let response: Response;
+    try {
+      const container = this.env.MATERIALIZER.get(
+        this.env.MATERIALIZER.idFromName(`@${registry.name.scope}/${registry.name.name}`),
+      );
+      response = await container.fetch(new Request("https://materializer.internal/materialize", {
+        method: "POST",
+        body: JSON.stringify({
+          job: {
+            package: registry.name,
+            branch: job.branch,
+            commitSha: job.commitSha,
+            version: job.version,
+          },
+          source: { owner: body.owner, repository: body.repository },
+          githubPat: body.pat,
+          statusUrl: body.statusUrl,
+        }),
+      }));
+    } catch (error) {
+      console.warn("materializer request failed", error instanceof Error ? error.message : "unknown error");
+      return this.#releaseLease(job.version);
+    }
+    if (!response.ok) {
+      const detail = await response.text();
+      const reason = detail === "source archive unavailable" || detail === "artifact publication unavailable"
+        ? detail
+        : "unknown error";
+      console.warn("materializer returned an error", response.status, reason);
+      return this.#releaseLease(job.version);
+    }
+
+    const outcome = parseMaterializationOutcome(await response.json().catch(() => undefined));
+    if (!outcome) return this.#releaseLease(job.version);
+    const completed = await this.#registry();
+    try {
+      if (outcome.state === "ready") completed.markReady(job.version);
+      else completed.markYanked(job.version, outcome.diagnostic);
+    } catch {
+      return new Response("materialization completion conflicted", { status: 409 });
+    }
+    await this.state.storage.put("registry", completed.snapshot());
+    return Response.json({ meta: completed.meta(), jobs: completed.jobs() });
+  }
+
+  async #releaseLease(version: string): Promise<Response> {
+    const registry = await this.#registry();
+    try {
+      registry.releaseLease(version);
+    } catch {
+      return new Response("materialization lease conflicted", { status: 409 });
+    }
+    await this.state.storage.put("registry", registry.snapshot());
+    return new Response("materialization unavailable", { status: 503, headers: { "retry-after": "1" } });
   }
 
   async #metadata(): Promise<Response> {
@@ -190,4 +284,15 @@ function parseDiagnostic(value: unknown): TombstoneDiagnostic | undefined {
   return typeof id === "string" && typeof failureClass === "string" && typeof message === "string"
     ? { id, failureClass, message }
     : undefined;
+}
+
+function parseMaterializationOutcome(value: unknown):
+  | { state: "ready" }
+  | { state: "yanked"; diagnostic: TombstoneDiagnostic }
+  | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { state, diagnostic } = value as { state?: unknown; diagnostic?: unknown };
+  if (state === "ready") return { state };
+  const parsedDiagnostic = parseDiagnostic(diagnostic);
+  return state === "yanked" && parsedDiagnostic ? { state, diagnostic: parsedDiagnostic } : undefined;
 }

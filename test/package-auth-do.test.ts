@@ -18,7 +18,7 @@ describe("package authorization durable object", () => {
       calls += 1;
       assert.equal(request.url, "https://api.github.com/repos/acme/widget");
       assert.equal(request.headers.get("authorization"), "Bearer pat");
-      return Response.json({ private: true });
+      return Response.json({ private: true, name: "widget" });
     };
     const request = () => new Request("https://package.invalid/authorize", { method: "POST", body: JSON.stringify({ fingerprint: "fp", owner: "acme", repository: "widget", pat: "pat" }) });
     try {
@@ -26,6 +26,20 @@ describe("package authorization durable object", () => {
       assert.equal((await object.fetch(request())).status, 200);
       assert.equal(calls, 1);
       assert.equal(JSON.stringify([...storage.values.values()]).includes("pat"), false);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("rejects an old repository name that GitHub redirects to a renamed repository", async () => {
+    const storage = new Storage();
+    const object = new PackageDurableObject({ storage });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => Response.json({ name: "widget-renamed" });
+    try {
+      const response = await object.fetch(new Request("https://package.invalid/authorize", {
+        method: "POST",
+        body: JSON.stringify({ fingerprint: "fp", owner: "acme", repository: "widget", pat: "pat" }),
+      }));
+      assert.deepEqual(await response.json(), { granted: false, expiresAt: (await storage.get<{ expiresAt: number }>("repository:fp"))!.expiresAt });
     } finally { globalThis.fetch = originalFetch; }
   });
 });

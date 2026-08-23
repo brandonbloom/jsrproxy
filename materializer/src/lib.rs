@@ -6,9 +6,12 @@ pub mod config;
 pub mod job;
 pub mod media_type;
 pub mod publication;
+pub mod service;
 pub mod tombstone;
 
-pub use job::{MaterializationJob, MaterializationRequest, PackageIdentity, SecretString};
+pub use job::{
+    MaterializationJob, MaterializationRequest, PackageIdentity, SecretString, SourceRepository,
+};
 pub use publication::{
     ArtifactFile, ArtifactStore, ManifestEntry, PackageMetadata, PublicationError,
     PublicationResult, publish,

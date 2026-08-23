@@ -18,11 +18,14 @@ personal use at this point: the checked-in staging configuration trusts only
 the `brandonbloom` GitHub account and maps only the `@brandonbloom` and
 `@crudetc` scopes. It is not a multi-user service configuration.
 
-The authorization, branch discovery, registry persistence, and R2 serving
-paths are implemented. The Container job runner and GitHub source
-materializer still need to be connected, so a newly observed synthetic package
-returns `503 package materialization pending` rather than package bytes. Reads
-outside configured synthetic scopes fall through to `jsr.io`.
+The authorization, branch discovery, registry persistence, R2 serving, and
+Container job-dispatch paths are implemented. The initial source materializer
+supports repositories with a root `deno.json` or `jsr.json` that declares
+exports and does not need import-map rewriting. Other deterministic source
+errors produce a yanked tombstone; infrastructure failures remain pending.
+Full Deno publish-compatible graph walking and specifier rewriting are still
+in progress. Reads outside configured synthetic scopes fall through to
+`jsr.io`.
 
 ## Development
 
