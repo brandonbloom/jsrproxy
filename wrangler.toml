@@ -38,10 +38,11 @@ new_sqlite_classes = ["MaterializerContainer"]
 
 # Staging has no durable state to preserve. Recreate these namespaces so the
 # SQLite-only implementation begins with no prior package or admission records.
+# The following deployment switches bindings to fresh namespaces; v4 retires
+# the now-unbound namespaces after Cloudflare has applied that switch.
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["AdmissionDurableObjectV2", "PackageDurableObjectV2"]
-deleted_classes = ["AdmissionDurableObject", "PackageDurableObject"]
 
 [env.staging]
 workers_dev = true
