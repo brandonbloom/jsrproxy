@@ -1,0 +1,17 @@
+name = "jsrproxy"
+main = "src/index.ts"
+compatibility_date = "2026-08-22"
+
+# Configure production bindings before deployment. The initial implementation
+# keeps all registry semantics behind testable storage-independent interfaces.
+[[durable_objects.bindings]]
+name = "ADMISSION"
+class_name = "AdmissionDurableObject"
+
+[[durable_objects.bindings]]
+name = "PACKAGES"
+class_name = "PackageDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AdmissionDurableObject", "PackageDurableObject"]

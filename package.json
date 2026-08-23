@@ -1,0 +1,10 @@
+{
+  "name": "jsrproxy",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "check": "deno check src/index.ts"
+  }
+}
