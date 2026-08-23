@@ -6,7 +6,12 @@ import { type R2BucketLike, serveArtifact } from "./r2-artifacts.ts";
 import { fallThrough, type ImmutableCache } from "./fallthrough.ts";
 import { parsePackageIdentity } from "./identity.ts";
 
-export { AdmissionDurableObjectV2, PackageDurableObjectV2 } from "./durable-objects.ts";
+export {
+  AdmissionDurableObject,
+  AdmissionDurableObjectV2,
+  PackageDurableObject,
+  PackageDurableObjectV2,
+} from "./durable-objects.ts";
 export { fallThrough } from "./fallthrough.ts";
 export { ContainerProxy } from "@cloudflare/containers";
 export { MaterializerContainer } from "./materializer-container.ts";
