@@ -112,9 +112,10 @@ not available on the Free plan.
 The Worker and Durable Object are a small TypeScript control plane. Registry
 semantics and materialization remain in Rust where practical. The Container
 accesses R2 through an outbound Worker handler and binding rather than holding
-S3 credentials. The caller's GitHub PAT accompanies a materialization job in
-memory and is forwarded only to GitHub. It is never written to Durable Object
-storage, R2, the Cache API, or logs.
+S3 credentials. The Worker uses the caller's GitHub PAT to fetch a pinned
+source archive, then sends the archive and credential-free job context to the
+Container. The PAT is never written to Durable Object storage, R2, the Cache
+API, Container input, or logs.
 
 Start with the `basic` Container instance type and benchmark representative
 packages before lowering or raising it. Configure an explicit `max_instances`
@@ -679,23 +680,22 @@ Cache API or R2. If the grant is expired and GitHub is unavailable, fail closed
 with `503`. GitHub remains the repository-authorization authority; the proxy
 owns only the trusted-user allowlist.
 
-### 9.3 Passing the PAT through materialization
+### 9.3 Fetching source for materialization
 
-The Worker passes the PAT through the Durable Object call and into the
-Container's in-memory job request. The Rust process uses it only for that job's
-GitHub requests. The outbound handler forwards it to GitHub and strips it from
-all R2 requests.
+The Package Durable Object uses the caller's PAT to fetch the pinned GitHub
+archive through the Worker, follows only GitHub's `codeload.github.com`
+redirect, and streams the archive to the Container. The Container receives no
+PAT and has no GitHub egress; its sole outbound handler writes verified
+artifacts to R2.
 
 The Durable Object persists the job and its lease but not the PAT. An alarm can
 expire an abandoned lease and return the job to `pending`, but cannot restart
 GitHub work by itself. The next authorized request supplies a PAT and resumes
-the job. The Container must redact authorization headers and must not write the
-PAT to disk or logs.
+the job. The Worker and Container must not write the PAT to disk or logs.
 
 This deliberately trusts the proxy with caller credentials. Unlike the public Go
-proxy model, private resolution does not bypass the proxy; TLS termination,
-Worker code, and the active Container process are inside the credential trust
-boundary.
+proxy model, private resolution does not bypass the proxy; TLS termination and
+Worker code are inside the credential trust boundary.
 
 ### 9.4 Proxy to jsr.io
 

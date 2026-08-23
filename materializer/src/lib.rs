@@ -10,7 +10,7 @@ pub mod service;
 pub mod tombstone;
 
 pub use job::{
-    MaterializationJob, MaterializationRequest, PackageIdentity, SecretString, SourceRepository,
+    MaterializationJob, MaterializationRequest, PackageIdentity, SourceRepository,
 };
 pub use publication::{
     ArtifactFile, ArtifactStore, ManifestEntry, PackageMetadata, PublicationError,

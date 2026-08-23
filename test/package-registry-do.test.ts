@@ -52,15 +52,28 @@ describe("package registry durable object", () => {
       }),
     }));
 
-    const response = await object.fetch(new Request("https://package.invalid/materialize", {
-      method: "POST",
-      body: JSON.stringify({ owner: "acme", repository: "widget", pat: "secret", statusUrl: "https://proxy.invalid/-/status/@acme/widget" }),
-    }));
+    const originalFetch = globalThis.fetch;
+    let requests = 0;
+    globalThis.fetch = async () => {
+      requests++;
+      if (requests === 1) return new Response(null, { status: 302, headers: { location: "https://codeload.github.com/acme/widget/tar.gz/first" } });
+      return new Response(new Uint8Array([1]), { status: 200 });
+    };
+    let response: Response;
+    try {
+      response = await object.fetch(new Request("https://package.invalid/materialize", {
+        method: "POST",
+        body: JSON.stringify({ owner: "acme", repository: "widget", pat: "secret", statusUrl: "https://proxy.invalid/-/status/@acme/widget" }),
+      }));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
     assert.equal(response.status, 200);
     assert.equal(materializer.requests.length, 1);
-    const body = await materializer.requests[0]!.json() as { githubPat: string; job: { version: string } };
-    assert.equal(body.githubPat, "secret");
-    assert.equal(body.job.version, "0.1.100");
+    assert.equal(materializer.requests[0]!.url, "https://materializer.internal/materialize-archive");
+    const context = JSON.parse(materializer.requests[0]!.headers.get("x-jsrproxy-materialization") ?? "{}") as { job: { version: string } };
+    assert.equal(context.job.version, "0.1.100");
+    assert.equal(materializer.requests[0]!.headers.get("x-jsrproxy-materialization")?.includes("secret"), false);
     assert.equal(JSON.stringify([...storage.values.values()]).includes("secret"), false);
     assert.deepEqual((await response.json() as { meta: unknown }).meta, {
       scope: "acme",

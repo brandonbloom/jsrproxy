@@ -194,7 +194,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::{PackageIdentity, SecretString, SourceRepository};
+    use crate::job::PackageIdentity;
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -301,17 +301,4 @@ mod tests {
         assert_eq!(error, PublicationError::InvalidPath("../secret.ts".into()));
     }
 
-    #[test]
-    fn redacts_the_pat_in_debug_output() {
-        let request = crate::job::MaterializationRequest {
-            job: job(),
-            github_pat: SecretString::new("github_pat_secret"),
-            source: SourceRepository {
-                owner: "acme".into(),
-                repository: "widget".into(),
-            },
-            status_url: "https://proxy.invalid/-/status/@acme/widget".into(),
-        };
-        assert!(!format!("{request:?}").contains("github_pat_secret"));
-    }
 }

@@ -177,12 +177,16 @@ export class PackageDurableObject {
 
     let response: Response;
     try {
+      const archive = await githubArchive(body.owner, body.repository, job.commitSha, body.pat);
+      if (!archive) return this.#releaseLease(job.version);
       const container = this.env.MATERIALIZER.get(
         this.env.MATERIALIZER.idFromName(`@${registry.name.scope}/${registry.name.name}`),
       );
-      response = await container.fetch(new Request("https://materializer.internal/materialize", {
+      response = await container.fetch(new Request("https://materializer.internal/materialize-archive", {
         method: "POST",
-        body: JSON.stringify({
+        headers: {
+          "content-type": "application/gzip",
+          "x-jsrproxy-materialization": JSON.stringify({
           job: {
             package: registry.name,
             branch: job.branch,
@@ -190,17 +194,19 @@ export class PackageDurableObject {
             version: job.version,
           },
           source: { owner: body.owner, repository: body.repository },
-          githubPat: body.pat,
           statusUrl: body.statusUrl,
         }),
-      }));
+        },
+        body: archive.body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" }));
     } catch (error) {
       console.warn("materializer request failed", error instanceof Error ? error.message : "unknown error");
       return this.#releaseLease(job.version);
     }
     if (!response.ok) {
       const detail = await response.text();
-      const reason = detail === "source archive unavailable" || detail === "artifact publication unavailable"
+      const reason = detail === "source archive unavailable" || detail.startsWith("artifact publication unavailable:")
         ? detail
         : "unknown error";
       console.warn("materializer returned an error", response.status, reason);
@@ -253,6 +259,26 @@ export class PackageDurableObject {
     if (!initialName) throw new Error("package state has not been initialized");
     return new PackageRegistry(initialName);
   }
+}
+
+async function githubArchive(owner: string, repository: string, commitSha: string, pat: string): Promise<Response | undefined> {
+  const archive = await fetch(
+    githubRequest(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/tarball/${encodeURIComponent(commitSha)}`, pat),
+    { redirect: "manual" },
+  );
+  if (archive.ok && archive.body && new URL(archive.url).hostname === "codeload.github.com") return archive;
+  if (!archive.status.toString().startsWith("30")) return undefined;
+  const location = archive.headers.get("location");
+  if (!location) return undefined;
+  let redirect: URL;
+  try {
+    redirect = new URL(location);
+  } catch {
+    return undefined;
+  }
+  if (redirect.protocol !== "https:" || redirect.hostname !== "codeload.github.com") return undefined;
+  const source = await fetch(redirect, { redirect: "manual" });
+  return source.ok && source.body ? source : undefined;
 }
 
 function parsePackageName(value: unknown): PackageName | undefined {

@@ -10,9 +10,11 @@ RUN mkdir -p materializer/src \
   && : > materializer/src/lib.rs \
   && cargo build --release --jobs 1 --package jsrproxy-materializer
 COPY materializer/src materializer/src
-RUN cargo build --release --jobs 1 --package jsrproxy-materializer
+RUN cargo clean --release --package jsrproxy-materializer \
+  && cargo build --release --jobs 1 --package jsrproxy-materializer \
+  && cp target/release/jsrproxy-materializer /materializer-output
 
 FROM debian:bookworm-slim
-COPY --from=builder /src/target/release/jsrproxy-materializer /usr/local/bin/jsrproxy-materializer
+COPY --from=builder /materializer-output /usr/local/bin/jsrproxy-materializer
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/jsrproxy-materializer"]

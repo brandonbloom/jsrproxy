@@ -1,5 +1,5 @@
 use crate::config::{SourceConfiguration, parse_root_configuration};
-use crate::job::MaterializationRequest;
+use crate::job::{MaterializationJob, MaterializationRequest, SourceRepository};
 use crate::publication::{ArtifactFile, ArtifactStore, StoreError, publish};
 use crate::tombstone::{TombstoneDiagnostic, build_tombstone};
 use flate2::read::GzDecoder;
@@ -12,7 +12,6 @@ use std::io::{Cursor, Read};
 use tar::Archive;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
-const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SOURCE_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -34,21 +33,21 @@ fn handle(request: &mut tiny_http::Request, client: &Client) -> Response<Cursor<
     if request.method() == &Method::Get && request.url() == "/health" {
         return plain_response(200, "ok");
     }
-    if request.method() != &Method::Post || request.url() != "/materialize" {
+    if request.method() != &Method::Post || request.url() != "/materialize-archive" {
         return plain_response(404, "not found");
     }
 
     let mut body = Vec::new();
     if request
         .as_reader()
-        .take(MAX_REQUEST_BYTES + 1)
+        .take(MAX_ARCHIVE_BYTES + 1)
         .read_to_end(&mut body)
         .is_err()
-        || body.len() as u64 > MAX_REQUEST_BYTES
+        || body.len() as u64 > MAX_ARCHIVE_BYTES
     {
         return plain_response(400, "invalid materialization request");
     }
-    let input = match serde_json::from_slice::<MaterializationRequest>(&body) {
+    let input = match materialization_input(request) {
         Ok(input)
             if valid_source_component(&input.source.owner)
                 && valid_source_component(&input.source.repository) =>
@@ -58,22 +57,22 @@ fn handle(request: &mut tiny_http::Request, client: &Client) -> Response<Cursor<
         _ => return plain_response(400, "invalid materialization request"),
     };
 
-    match run_materialization(&input, client) {
+    match run_materialization(&input, body, client) {
         Ok(outcome) => json_response(200, &outcome),
-        Err(error) => plain_response(503, error.message()),
+        Err(error) => plain_response(503, &error.message()),
     }
 }
 
 fn run_materialization(
     input: &MaterializationRequest,
+    archive: Vec<u8>,
     client: &Client,
 ) -> Result<MaterializationOutcome, MaterializationError> {
-    let archive = fetch_archive(input, client)?;
     match source_package(&archive, input) {
         Ok((files, exports)) => {
             let mut store = HttpArtifactStore { client };
             publish(&mut store, &input.job, files, exports)
-                .map_err(|_| MaterializationError::ArtifactPublicationUnavailable)?;
+                .map_err(|error| MaterializationError::ArtifactPublicationUnavailable(error.to_string()))?;
             Ok(MaterializationOutcome::Ready)
         }
         Err(failure) => {
@@ -90,77 +89,35 @@ fn run_materialization(
             );
             let mut store = HttpArtifactStore { client };
             publish(&mut store, &input.job, tombstone.files, tombstone.exports)
-                .map_err(|_| MaterializationError::ArtifactPublicationUnavailable)?;
+                .map_err(|error| MaterializationError::ArtifactPublicationUnavailable(error.to_string()))?;
             Ok(MaterializationOutcome::Yanked { diagnostic })
         }
     }
 }
 
-fn fetch_archive(
-    input: &MaterializationRequest,
-    client: &Client,
-) -> Result<Vec<u8>, MaterializationError> {
-    let url = format!(
-        "https://api.github.com/repos/{}/{}/tarball/{}",
-        input.source.owner, input.source.repository, input.job.commit_sha
-    );
-    let response = github_get(client, &url, input)?;
-    let response = if response.status().is_redirection() {
-        let location = response
-            .headers()
-            .get("location")
-            .and_then(|value| value.to_str().ok())
-            .ok_or(MaterializationError::SourceArchiveUnavailable)?;
-        let redirect = reqwest::Url::parse(location)
-            .map_err(|_| MaterializationError::SourceArchiveUnavailable)?;
-        if redirect.scheme() != "https" || redirect.host_str() != Some("codeload.github.com") {
-            return Err(MaterializationError::SourceArchiveUnavailable);
-        }
-        github_get(client, redirect.as_str(), input)?
-    } else {
-        response
-    };
-    let response = response
-        .error_for_status()
-        .map_err(|_| MaterializationError::SourceArchiveUnavailable)?;
-    let mut archive = Vec::new();
-    response
-        .take(MAX_ARCHIVE_BYTES + 1)
-        .read_to_end(&mut archive)
-        .map_err(|_| MaterializationError::SourceArchiveUnavailable)?;
-    if archive.len() as u64 > MAX_ARCHIVE_BYTES {
-        return Err(MaterializationError::SourceArchiveUnavailable);
-    }
-    Ok(archive)
+fn materialization_input(
+    request: &tiny_http::Request,
+) -> Result<MaterializationRequest, serde_json::Error> {
+    let context = request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("x-jsrproxy-materialization"))
+        .map(|header| header.value.as_str())
+        .unwrap_or_default();
+    let context = serde_json::from_str::<ArchiveMaterializationContext>(context)?;
+    Ok(MaterializationRequest {
+        job: context.job,
+        source: context.source,
+        status_url: context.status_url,
+    })
 }
 
-fn github_get(
-    client: &Client,
-    url: &str,
-    input: &MaterializationRequest,
-) -> Result<reqwest::blocking::Response, MaterializationError> {
-    let upstream =
-        reqwest::Url::parse(url).map_err(|_| MaterializationError::SourceArchiveUnavailable)?;
-    let host = match upstream.host_str() {
-        Some("api.github.com") => "api.github.com",
-        Some("codeload.github.com") => "codeload.github.com",
-        _ => return Err(MaterializationError::SourceArchiveUnavailable),
-    };
-    let mut proxy = reqwest::Url::parse("http://github.internal")
-        .map_err(|_| MaterializationError::SourceArchiveUnavailable)?;
-    proxy.set_path(upstream.path());
-    proxy.set_query(upstream.query());
-    client
-        .get(proxy)
-        .header("accept", "application/vnd.github+json")
-        .header("x-jsrproxy-github-host", host)
-        .header(
-            "authorization",
-            format!("Bearer {}", input.github_pat.expose()),
-        )
-        .header("user-agent", "jsrproxy-materializer")
-        .send()
-        .map_err(|_| MaterializationError::SourceArchiveUnavailable)
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveMaterializationContext {
+    job: MaterializationJob,
+    source: SourceRepository,
+    status_url: String,
 }
 
 fn source_package(
@@ -337,7 +294,7 @@ impl ArtifactStore for HttpArtifactStore<'_> {
             409 => Err(StoreError::ExistingObjectHasDifferentHash {
                 key: key.to_owned(),
             }),
-            _ => Err(StoreError::Unavailable("artifact upload failed".to_owned())),
+            status => Err(StoreError::Unavailable(format!("artifact upload returned HTTP {status}"))),
         }
     }
 }
@@ -358,15 +315,13 @@ struct CompletionDiagnostic {
 }
 
 enum MaterializationError {
-    SourceArchiveUnavailable,
-    ArtifactPublicationUnavailable,
+    ArtifactPublicationUnavailable(String),
 }
 
 impl MaterializationError {
-    fn message(&self) -> &'static str {
+    fn message(&self) -> String {
         match self {
-            Self::SourceArchiveUnavailable => "source archive unavailable",
-            Self::ArtifactPublicationUnavailable => "artifact publication unavailable",
+            Self::ArtifactPublicationUnavailable(error) => format!("artifact publication unavailable: {error}"),
         }
     }
 }
@@ -407,7 +362,7 @@ impl SourceFailure {
 
 impl fmt::Display for MaterializationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.message())
+        formatter.write_str(&self.message())
     }
 }
 
@@ -437,7 +392,7 @@ fn response(status: u16, body: Vec<u8>, content_type: &str) -> Response<Cursor<V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::job::{MaterializationJob, PackageIdentity, SecretString, SourceRepository};
+    use crate::job::{MaterializationJob, PackageIdentity, SourceRepository};
     use flate2::{Compression, write::GzEncoder};
     use tar::Builder;
 
@@ -452,7 +407,6 @@ mod tests {
                 commit_sha: "abc".into(),
                 version: "0.1.42".into(),
             },
-            github_pat: SecretString::new("pat"),
             source: SourceRepository {
                 owner: "acme".into(),
                 repository: "widget".into(),
