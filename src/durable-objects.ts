@@ -313,18 +313,6 @@ export class PackageDurableObjectV2 {
   }
 }
 
-/**
- * Exported only so Cloudflare can retire the old namespace in migration v3.
- * No binding routes traffic to this class.
- */
-export class AdmissionDurableObject extends AdmissionDurableObjectV2 {}
-
-/**
- * Exported only so Cloudflare can retire the old namespace in migration v3.
- * No binding routes traffic to this class.
- */
-export class PackageDurableObject extends PackageDurableObjectV2 {}
-
 function first<T>(rows: Iterable<T> | undefined): T | undefined {
   return rows?.[Symbol.iterator]().next().value;
 }

@@ -7,9 +7,7 @@ import { fallThrough, type ImmutableCache } from "./fallthrough.ts";
 import { parsePackageIdentity } from "./identity.ts";
 
 export {
-  AdmissionDurableObject,
   AdmissionDurableObjectV2,
-  PackageDurableObject,
   PackageDurableObjectV2,
 } from "./durable-objects.ts";
 export { fallThrough } from "./fallthrough.ts";
