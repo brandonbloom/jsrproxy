@@ -23,9 +23,10 @@ describe("GitHub PAT handling", () => {
     });
   });
 
-  test("uses the GitHub REST media type and caller PAT", () => {
+  test("uses required GitHub REST headers and the caller PAT", () => {
     const request = githubRequest("https://api.github.com/user", "pat");
     assert.equal(request.headers.get("authorization"), "Bearer pat");
     assert.equal(request.headers.get("accept"), "application/vnd.github+json");
+    assert.equal(request.headers.get("user-agent"), "jsrproxy");
   });
 });

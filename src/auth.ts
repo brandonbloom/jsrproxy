@@ -45,6 +45,7 @@ export function githubRequest(url: string, pat: string): Request {
     headers: {
       accept: "application/vnd.github+json",
       authorization: `Bearer ${pat}`,
+      "user-agent": "jsrproxy",
       "x-github-api-version": "2022-11-28",
     },
   });
