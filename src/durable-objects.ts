@@ -7,6 +7,11 @@ import { publishArtifactBatch, type R2PublicationBucket } from "./r2-publication
 interface DurableStorage {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
+  sql?: DurableSql;
+}
+
+interface DurableSql {
+  exec<T extends Record<string, unknown>>(query: string, ...bindings: (string | number | null)[]): Iterable<T>;
 }
 
 interface DurableState {
@@ -133,7 +138,7 @@ export class PackageDurableObject {
     if (!name || !discovery) return new Response("invalid package refresh", { status: 400 });
     const registry = await this.#registry(name);
     const created = registry.refresh(discovery);
-    await this.state.storage.put("registry", registry.snapshot());
+    await this.#saveRegistry(registry);
     return Response.json({ meta: registry.meta(), jobs: registry.jobs(), created });
   }
 
@@ -147,7 +152,7 @@ export class PackageDurableObject {
     const registry = await this.#registry();
     try {
       const job = registry.recoverVersion(body.version, body.reason.trim(), body.recoveredAt);
-      await this.state.storage.put("registry", registry.snapshot());
+      await this.#saveRegistry(registry);
       return Response.json({ job, recoveries: registry.recoveries() }, { status: 202 });
     } catch (error) {
       return new Response(error instanceof Error ? error.message : "invalid recovery request", { status: 409 });
@@ -172,7 +177,7 @@ export class PackageDurableObject {
     } catch (error) {
       return new Response(error instanceof Error ? error.message : "invalid completion", { status: 409 });
     }
-    await this.state.storage.put("registry", registry.snapshot());
+    await this.#saveRegistry(registry);
     return Response.json(registry.meta());
   }
 
@@ -193,7 +198,7 @@ export class PackageDurableObject {
     const registry = await this.#registry();
     const job = registry.leaseNext();
     if (!job) return Response.json({ meta: registry.meta(), jobs: registry.jobs() });
-    await this.state.storage.put("registry", registry.snapshot());
+    await this.#saveRegistry(registry);
 
     let response: Response;
     try {
@@ -246,7 +251,7 @@ export class PackageDurableObject {
     } catch {
       return new Response("materialization completion conflicted", { status: 409 });
     }
-    await this.state.storage.put("registry", completed.snapshot());
+    await this.#saveRegistry(completed);
     return Response.json({ meta: completed.meta(), jobs: completed.jobs() });
   }
 
@@ -257,7 +262,7 @@ export class PackageDurableObject {
     } catch {
       return new Response("materialization lease conflicted", { status: 409 });
     }
-    await this.state.storage.put("registry", registry.snapshot());
+    await this.#saveRegistry(registry);
     return new Response("materialization unavailable", { status: 503, headers: { "retry-after": "1" } });
   }
 
@@ -272,7 +277,13 @@ export class PackageDurableObject {
   }
 
   async #registry(initialName?: PackageName): Promise<PackageRegistry> {
-    const snapshot = await this.state.storage.get<PackageRegistrySnapshot>("registry");
+    this.#ensurePackageSchema();
+    const row = first(this.state.storage.sql?.exec<{ snapshot: string }>(
+      "SELECT snapshot FROM package_registry WHERE id = 1",
+    ));
+    const snapshot = row
+      ? JSON.parse(row.snapshot) as PackageRegistrySnapshot
+      : await this.state.storage.get<PackageRegistrySnapshot>("registry");
     if (snapshot) {
       const registry = PackageRegistry.fromSnapshot(snapshot);
       if (initialName && (registry.name.scope !== initialName.scope || registry.name.name !== initialName.name)) {
@@ -283,6 +294,35 @@ export class PackageDurableObject {
     if (!initialName) throw new Error("package state has not been initialized");
     return new PackageRegistry(initialName);
   }
+
+  /**
+   * Persists one state-machine transition in the Durable Object's SQLite
+   * database. The legacy key is read only to migrate objects written before
+   * this table existed; new state is never written back to that key.
+   */
+  async #saveRegistry(registry: PackageRegistry): Promise<void> {
+    const snapshot = registry.snapshot();
+    const sql = this.state.storage.sql;
+    if (!sql) {
+      await this.state.storage.put("registry", snapshot);
+      return;
+    }
+    this.#ensurePackageSchema();
+    sql.exec(
+      "INSERT INTO package_registry (id, snapshot) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET snapshot = excluded.snapshot",
+      JSON.stringify(snapshot),
+    );
+  }
+
+  #ensurePackageSchema(): void {
+    this.state.storage.sql?.exec(
+      "CREATE TABLE IF NOT EXISTS package_registry (id INTEGER PRIMARY KEY CHECK (id = 1), snapshot TEXT NOT NULL)",
+    );
+  }
+}
+
+function first<T>(rows: Iterable<T> | undefined): T | undefined {
+  return rows?.[Symbol.iterator]().next().value;
 }
 
 async function githubArchive(owner: string, repository: string, commitSha: string, pat: string): Promise<Response | undefined> {

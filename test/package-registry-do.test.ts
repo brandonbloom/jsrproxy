@@ -11,6 +11,23 @@ class Storage {
   async put<T>(key: string, value: T): Promise<void> { this.values.set(key, value); }
 }
 
+class SqliteStorage extends Storage {
+  snapshot?: string;
+  readonly queries: string[] = [];
+  readonly sql = {
+    exec: <T extends Record<string, unknown>>(query: string, ...bindings: (string | number | null)[]): Iterable<T> => {
+      this.queries.push(query);
+      if (query.startsWith("SELECT snapshot")) {
+        return this.snapshot ? [{ snapshot: this.snapshot } as T] : [];
+      }
+      if (query.startsWith("INSERT INTO package_registry")) {
+        this.snapshot = bindings[0] as string;
+      }
+      return [];
+    },
+  };
+}
+
 class Materializer {
   requests: Request[] = [];
 
@@ -66,6 +83,40 @@ describe("package registry durable object", () => {
       jobs: [{ branch: "main", commitSha: "first", major: 0, version: "0.1.100", state: "ready" }],
       recoveries: [],
     });
+  });
+
+  test("uses SQLite as package-state authority after migrating the legacy snapshot", async () => {
+    const legacyStorage = new Storage();
+    const legacy = new PackageDurableObject({ storage: legacyStorage });
+    const initialRefresh = new Request("https://package.invalid/refresh", {
+      method: "POST",
+      body: JSON.stringify({
+        package: { scope: "acme", name: "widget" },
+        discovery: { defaultBranch: "main", branches: [{ name: "main", sha: "first", committedAt: 100 }] },
+      }),
+    });
+    assert.equal((await legacy.fetch(initialRefresh)).status, 200);
+
+    const storage = new SqliteStorage();
+    const legacySnapshot = legacyStorage.values.get("registry");
+    storage.values.set("registry", legacySnapshot);
+    const object = new PackageDurableObject({ storage });
+    const refresh = await object.fetch(new Request("https://package.invalid/refresh", {
+      method: "POST",
+      body: JSON.stringify({
+        package: { scope: "acme", name: "widget" },
+        discovery: { defaultBranch: "main", branches: [{ name: "main", sha: "first", committedAt: 100 }] },
+      }),
+    }));
+    assert.equal(refresh.status, 200);
+    assert.equal(storage.values.get("registry"), legacySnapshot);
+    assert.ok(storage.snapshot?.includes("0.1.100"));
+
+    const rehydrated = new PackageDurableObject({ storage });
+    const metadata = await rehydrated.fetch(new Request("https://package.invalid/metadata"));
+    assert.deepEqual(await metadata.json(), { scope: "acme", name: "widget", versions: {} });
+    assert.ok(storage.queries.some((query) => query.startsWith("CREATE TABLE IF NOT EXISTS package_registry")));
+    assert.ok(storage.queries.some((query) => query.startsWith("INSERT INTO package_registry")));
   });
 
   test("leases a pending job to the package Container without persisting its PAT", async () => {
