@@ -1,4 +1,5 @@
 use crate::config::{SourceConfiguration, parse_root_configuration};
+use crate::import_rewrite::rewrite_import_map_specifiers;
 use crate::job::{MaterializationJob, MaterializationRequest, SourceRepository};
 use crate::publication::{ArtifactFile, ArtifactStore, StoreError, publish};
 use crate::tombstone::{TombstoneDiagnostic, build_tombstone};
@@ -203,79 +204,9 @@ fn rewrite_source_imports(
         ) {
             continue;
         }
-        *bytes = rewrite_module_specifiers(path, bytes, imports)?.into_bytes();
+        *bytes = rewrite_import_map_specifiers(path, bytes, imports)?.into_bytes();
     }
     Ok(())
-}
-
-fn rewrite_module_specifiers(
-    path: &str,
-    bytes: &[u8],
-    imports: &BTreeMap<String, String>,
-) -> Result<String, String> {
-    let source =
-        std::str::from_utf8(bytes).map_err(|_| format!("source file {path} is not UTF-8"))?;
-    let mut aliases: Vec<&str> = imports.keys().map(String::as_str).collect();
-    aliases.sort_by_key(|alias| std::cmp::Reverse(alias.len()));
-    let mut rewritten = source.to_owned();
-    for alias in aliases {
-        let replacement = rewrite_specifier(path, alias, imports);
-        if alias.ends_with('/') {
-            rewritten = rewritten.replace(&format!("\"{alias}"), &format!("\"{replacement}"));
-            rewritten = rewritten.replace(&format!("'{alias}"), &format!("'{replacement}"));
-        } else {
-            rewritten = rewritten.replace(&format!("\"{alias}\""), &format!("\"{replacement}\""));
-            rewritten = rewritten.replace(&format!("'{alias}'"), &format!("'{replacement}'"));
-        }
-    }
-    Ok(rewritten)
-}
-
-fn rewrite_specifier(
-    source_path: &str,
-    specifier: &str,
-    imports: &BTreeMap<String, String>,
-) -> String {
-    let candidate = imports
-        .iter()
-        .filter_map(|(alias, target)| {
-            let suffix = if alias.ends_with('/') {
-                specifier.strip_prefix(alias)
-            } else if specifier == alias {
-                Some("")
-            } else {
-                None
-            }?;
-            Some((alias.len(), target, suffix))
-        })
-        .max_by_key(|(length, _, _)| *length);
-    let Some((_, target, suffix)) = candidate else {
-        return specifier.to_owned();
-    };
-    if let Some(target) = target.strip_prefix("./") {
-        return relative_specifier(source_path, &format!("{target}{suffix}"));
-    }
-    format!("{target}{suffix}")
-}
-
-fn relative_specifier(source_path: &str, target_path: &str) -> String {
-    let source: Vec<&str> = source_path.split('/').collect();
-    let source_directory = &source[..source.len().saturating_sub(1)];
-    let target: Vec<&str> = target_path.split('/').collect();
-    let shared = source_directory
-        .iter()
-        .zip(&target)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let mut components = Vec::new();
-    components.extend(std::iter::repeat_n("..", source_directory.len() - shared));
-    components.extend(&target[shared..]);
-    let value = components.join("/");
-    if value.starts_with("..") {
-        value
-    } else {
-        format!("./{value}")
-    }
 }
 
 fn unpack_archive(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, SourceFailure> {
@@ -936,7 +867,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             std::str::from_utf8(&entrypoint.bytes).unwrap(),
-            "import { assert } from 'jsr:@std/assert@1.0.19';\nimport { value } from '../value.ts';\nexport { assert, value };\n"
+            "import { assert } from \"jsr:@std/assert@1.0.19\";\nimport { value } from \"../value.ts\";\nexport { assert, value };\n"
         );
     }
 }

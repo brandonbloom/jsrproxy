@@ -3,6 +3,7 @@
 //! behind the same job boundary; this crate already owns immutable publication.
 
 pub mod config;
+mod import_rewrite;
 pub mod job;
 mod jsr_exports;
 pub mod media_type;

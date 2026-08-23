@@ -27,3 +27,16 @@ service. Each entry records the exact reviewed source and local changes.
   single-root source archives, not a copy of JSR's publishing-service code.
 - Update procedure: compare limits and validation behavior with the recorded
   upstream source before changing them, then extend local archive tests.
+
+## JSR syntax-aware import rewriting
+
+- Upstream: [`jsr-io/jsr` `api/src/npm/import_transform.rs`](https://github.com/jsr-io/jsr/blob/ba17475bff1bbb870ce015866d768284efa44d8c/api/src/npm/import_transform.rs), commit `ba17475bff1bbb870ce015866d768284efa44d8c`.
+- License: MIT; the upstream copyright and license notice are retained in
+  `src/import_rewrite.rs`.
+- Local file: `src/import_rewrite.rs`.
+- Adaptation: use `deno_ast` to transform only this proxy's import-map aliases
+  in imports, re-exports, literal dynamic imports, and TypeScript import types.
+  Preserve JSR's AST-node approach but omit its npm-emission-specific resolver.
+- Update procedure: compare this transformer and the `deno_ast` dependency with
+  upstream before changing them, retain the license notice, and extend parser
+  coverage before updating this record.
