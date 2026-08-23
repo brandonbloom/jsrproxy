@@ -20,3 +20,21 @@ export function parsePackageIdentity(pathname: string): { scope: string; name: s
   const name = proxyableRepositoryName(match[2]);
   return name ? { scope: match[1], name } : undefined;
 }
+
+/** Parses the authenticated diagnostic route for a synthetic package. */
+export function parsePackageStatusPath(pathname: string): { identity: { scope: string; name: string }; version?: string } | undefined {
+  const match = /^\/-\/status\/@([a-z0-9][a-z0-9-]*)\/([a-z0-9-]+)(?:\/([0-9]+\.[0-9]+\.[0-9]+))?$/.exec(pathname);
+  if (!match) return undefined;
+  const name = proxyableRepositoryName(match[2]);
+  if (!name) return undefined;
+  return { identity: { scope: match[1], name }, version: match[3] };
+}
+
+/** Parses the deployment-operator recovery route for one published version. */
+export function parsePackageRecoveryPath(pathname: string): { identity: { scope: string; name: string }; version: string } | undefined {
+  const match = /^\/-\/recover\/@([a-z0-9][a-z0-9-]*)\/([a-z0-9-]+)\/([0-9]+\.[0-9]+\.[0-9]+)$/.exec(pathname);
+  if (!match) return undefined;
+  const name = proxyableRepositoryName(match[2]);
+  if (!name) return undefined;
+  return { identity: { scope: match[1], name }, version: match[3] };
+}

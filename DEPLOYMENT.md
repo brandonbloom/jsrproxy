@@ -8,10 +8,17 @@
    npx wrangler secret put AUTH_FINGERPRINT_SECRET
    ```
 
-3. Set `JSRPROXY_CONFIG` as a Worker secret or environment variable. Its
+3. Set a separate deployment-operator recovery secret. It must not be shared
+   with package consumers or GitHub:
+
+   ```sh
+   npx wrangler secret put RECOVERY_SECRET
+   ```
+
+4. Set `JSRPROXY_CONFIG` as a Worker secret or environment variable. Its
    `trusted_github_users` list and `scopes` map are deployment-owned data.
-4. Run `npm test`, `npm run check`, and `cargo test --workspace`.
-5. Install and start Docker, then deploy a staging Worker with
+5. Run `npm test`, `npm run check`, and `cargo test --workspace`.
+6. Install and start Docker, then deploy a staging Worker with
    `npx wrangler deploy --env staging` after adding the staging account and
    route. Wrangler builds and publishes `materializer/Dockerfile` as part of
    that deployment.

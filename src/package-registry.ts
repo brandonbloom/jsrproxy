@@ -22,6 +22,13 @@ export interface TombstoneDiagnostic {
   message: string;
 }
 
+export interface RecoveryAudit {
+  originalVersion: string;
+  replacementVersion: string;
+  reason: string;
+  recoveredAt: number;
+}
+
 const MATERIALIZATION_LEASE_TIMEOUT_MS = 120_000;
 
 interface VersionRecord extends MaterializationJob {
@@ -38,6 +45,7 @@ export interface PackageRegistrySnapshot {
   branches: BranchState;
   allocator: VersionAllocatorSnapshot;
   versions: readonly VersionSnapshot[];
+  recoveries?: readonly RecoveryAudit[];
 }
 
 /** A JSR package `meta.json` document. */
@@ -57,6 +65,7 @@ export interface PackageMeta {
 export class PackageRegistry {
   readonly #allocator: VersionAllocator;
   readonly #versions = new Map<string, VersionRecord>();
+  readonly #recoveries: RecoveryAudit[] = [];
   readonly name: PackageName;
   #branches: BranchState = { highestObservedReleaseMajor: undefined };
 
@@ -76,6 +85,7 @@ export class PackageRegistry {
         assignment: { ...version.assignment },
       });
     }
+    registry.#recoveries.push(...(snapshot.recoveries ?? []).map((recovery) => ({ ...recovery })));
     return registry;
   }
 
@@ -89,6 +99,7 @@ export class PackageRegistry {
         ...copyJob(version),
         assignment: { ...version.assignment },
       })),
+      recoveries: this.#recoveries.map((recovery) => ({ ...recovery })),
     };
   }
 
@@ -115,35 +126,24 @@ export class PackageRegistry {
     return created;
   }
 
-  /** Allocates replacement attempts for published outcomes after an explicit repair. */
-  recoverYanked(): readonly MaterializationJob[] {
-    const recovered: MaterializationJob[] = [];
-    const latest = new Map<string, VersionRecord>();
-    for (const record of this.#versions.values()) {
-      const existing = latest.get(record.commitSha);
-      if (!existing || record.assignment.attempt > existing.assignment.attempt) {
-        latest.set(record.commitSha, record);
-      }
+  /** Supersedes one published outcome after an authenticated proxy repair. */
+  recoverVersion(version: string, reason: string, recoveredAt: number): MaterializationJob {
+    const record = this.#versions.get(version);
+    if (!record || (record.state !== "ready" && record.state !== "yanked")) {
+      throw new Error(`version ${version} cannot be recovered`);
     }
-    for (const record of latest.values()) {
-      if (record.state !== "yanked" && record.state !== "ready") continue;
-      const assignment = this.#allocator.recover(
-        record.major,
-        record.commitSha,
-        record.assignment.sequence,
-      );
-      const replacement: VersionRecord = {
-        assignment,
-        branch: record.branch,
-        commitSha: record.commitSha,
-        major: record.major,
-        version: assignment.version,
-        state: "pending",
-      };
-      this.#versions.set(replacement.version, replacement);
-      recovered.push(copyJob(replacement));
-    }
-    return recovered;
+    const assignment = this.#allocator.recover(record.major, record.commitSha, record.assignment.sequence);
+    const replacement: VersionRecord = {
+      assignment,
+      branch: record.branch,
+      commitSha: record.commitSha,
+      major: record.major,
+      version: assignment.version,
+      state: "pending",
+    };
+    this.#versions.set(replacement.version, replacement);
+    this.#recoveries.push({ originalVersion: version, replacementVersion: replacement.version, reason, recoveredAt });
+    return copyJob(replacement);
   }
 
   /** Marks a complete artifact set ready after its R2 ready marker exists. */
@@ -200,6 +200,10 @@ export class PackageRegistry {
   /** Snapshot used by the authenticated package-status route. */
   jobs(): readonly MaterializationJob[] {
     return [...this.#versions.values()].map(copyJob);
+  }
+
+  recoveries(): readonly RecoveryAudit[] {
+    return this.#recoveries.map((recovery) => ({ ...recovery }));
   }
 
   #requirePending(version: string): VersionRecord {

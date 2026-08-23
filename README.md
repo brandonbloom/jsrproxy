@@ -85,10 +85,10 @@ The test suite uses no live Cloudflare or GitHub credentials.
 - Requests for configured scopes require the PAT to authenticate as a trusted
   GitHub user and authorize access to the mapped repository. Other JSR reads
   do not forward caller credentials to `jsr.io`.
-- `?recover=true` on a package metadata request starts replacement attempts for
-  published outcomes after a confirmed proxy repair. It is an experimental
-  operator control in this personal deployment; it preserves old immutable
-  artifacts and allocates fresh versions.
+- Operators repair a confirmed proxy defect with `POST /-/recover/@<scope>/<name>/<version>`,
+  an `x-jsrproxy-recovery-secret` header, and a written JSON `reason`. The
+  operation preserves old immutable artifacts, records an audit entry, and
+  allocates a fresh replacement version.
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for the deployment checklist and
 [DESIGN.md](DESIGN.md) for the registry and security model.

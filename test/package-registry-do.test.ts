@@ -60,6 +60,12 @@ describe("package registry durable object", () => {
     assert.equal((await object.fetch(new Request("https://package.invalid/complete", { method: "POST", body: JSON.stringify({ version: "0.1.100", state: "ready" }) }))).status, 200);
     const metadata = await object.fetch(new Request("https://package.invalid/metadata"));
     assert.deepEqual(await metadata.json(), { scope: "acme", name: "widget", versions: { "0.1.100": { yanked: false } } });
+    const status = await object.fetch(new Request("https://package.invalid/status"));
+    assert.deepEqual(await status.json(), {
+      meta: { scope: "acme", name: "widget", versions: { "0.1.100": { yanked: false } } },
+      jobs: [{ branch: "main", commitSha: "first", major: 0, version: "0.1.100", state: "ready" }],
+      recoveries: [],
+    });
   });
 
   test("leases a pending job to the package Container without persisting its PAT", async () => {

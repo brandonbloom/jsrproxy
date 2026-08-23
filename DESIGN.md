@@ -554,12 +554,13 @@ assignment pointer, and creates a new pending job. The original version and
 tombstone bytes remain immutable and yanked. If recovery succeeds, the new
 non-yanked version becomes selectable normally.
 
-The experimental personal deployment exposes recovery as `?recover=true` on an
-otherwise authorized package-metadata request. It is not appropriate for a
-multi-user deployment: production use needs a separate deployment-administrator
-control with an audit record. Recovery neither supplies a GitHub credential nor
-bypasses repository authorization; the next authorized package request provides
-the PAT that runs the pending replacement job.
+Recovery uses `POST /-/recover/@<scope>/<name>/<version>` with a separate
+deployment `RECOVERY_SECRET` and a written reason. It does not accept a caller
+PAT or share authentication with package consumption. The Package Durable
+Object appends an audit entry containing the original and replacement versions,
+the reason, and the recovery time. Recovery neither supplies a GitHub credential
+nor bypasses repository authorization; the next authorized package request
+provides the PAT that runs the pending replacement job.
 
 ### 8.2 Upstream-derived Rust implementation
 

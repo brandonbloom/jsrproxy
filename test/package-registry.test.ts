@@ -51,7 +51,7 @@ describe("package registry state", () => {
     const registry = new PackageRegistry({ scope: "acme", name: "widget" });
     registry.refresh(discovery("broken", 100));
     registry.markYanked("0.1.100", { id: "mat-1", failureClass: "source", message: "fixed later" });
-    assert.deepEqual(registry.recoverYanked().map((job) => job.version), ["0.1.101"]);
+    assert.equal(registry.recoverVersion("0.1.100", "repair", 123).version, "0.1.101");
     assert.equal(registry.jobs().find((job) => job.version === "0.1.101")?.state, "pending");
   });
 
@@ -60,8 +60,21 @@ describe("package registry state", () => {
     registry.refresh(discovery("first", 100));
     registry.markReady("0.1.100");
 
-    assert.deepEqual(registry.recoverYanked().map((job) => job.version), ["0.1.101"]);
+    assert.equal(registry.recoverVersion("0.1.100", "repair", 123).version, "0.1.101");
     assert.equal(registry.jobs().find((job) => job.version === "0.1.101")?.state, "pending");
+  });
+
+  test("records an auditable, version-scoped recovery", () => {
+    const registry = new PackageRegistry({ scope: "acme", name: "widget" });
+    registry.refresh(discovery("first", 100));
+    registry.markReady("0.1.100");
+
+    const replacement = registry.recoverVersion("0.1.100", "correct manifest paths", 123);
+
+    assert.equal(replacement.version, "0.1.101");
+    assert.deepEqual(registry.recoveries(), [{
+      originalVersion: "0.1.100", replacementVersion: "0.1.101", reason: "correct manifest paths", recoveredAt: 123,
+    }]);
   });
 
   test("preserves branch and allocation state across Durable Object storage", () => {

@@ -91,6 +91,7 @@ export class PackageDurableObject {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/authorize") return this.#authorize(request);
     if (request.method === "POST" && url.pathname === "/refresh") return this.#refresh(request);
+    if (request.method === "POST" && url.pathname === "/recover") return this.#recover(request);
     if (request.method === "POST" && url.pathname === "/materialize") return this.#materialize(request);
     if (request.method === "POST" && url.pathname === "/complete") return this.#complete(request);
     if (request.method === "GET" && url.pathname === "/metadata") return this.#metadata();
@@ -126,14 +127,31 @@ export class PackageDurableObject {
   }
 
   async #refresh(request: Request): Promise<Response> {
-    const body = await request.json().catch(() => undefined) as { package?: unknown; discovery?: unknown; recover?: unknown } | undefined;
+    const body = await request.json().catch(() => undefined) as { package?: unknown; discovery?: unknown } | undefined;
     const name = parsePackageName(body?.package);
     const discovery = parseDiscovery(body?.discovery);
     if (!name || !discovery) return new Response("invalid package refresh", { status: 400 });
     const registry = await this.#registry(name);
-    const created = [...registry.refresh(discovery), ...(body?.recover === true ? registry.recoverYanked() : [])];
+    const created = registry.refresh(discovery);
     await this.state.storage.put("registry", registry.snapshot());
     return Response.json({ meta: registry.meta(), jobs: registry.jobs(), created });
+  }
+
+  async #recover(request: Request): Promise<Response> {
+    const body = await request.json().catch(() => undefined) as { version?: unknown; reason?: unknown; recoveredAt?: unknown } | undefined;
+    if (
+      typeof body?.version !== "string" ||
+      typeof body.reason !== "string" || body.reason.trim().length === 0 || body.reason.length > 1_000 ||
+      typeof body.recoveredAt !== "number" || !Number.isSafeInteger(body.recoveredAt) || body.recoveredAt < 0
+    ) return new Response("invalid recovery request", { status: 400 });
+    const registry = await this.#registry();
+    try {
+      const job = registry.recoverVersion(body.version, body.reason.trim(), body.recoveredAt);
+      await this.state.storage.put("registry", registry.snapshot());
+      return Response.json({ job, recoveries: registry.recoveries() }, { status: 202 });
+    } catch (error) {
+      return new Response(error instanceof Error ? error.message : "invalid recovery request", { status: 409 });
+    }
   }
 
   async #complete(request: Request): Promise<Response> {
@@ -250,7 +268,7 @@ export class PackageDurableObject {
 
   async #status(): Promise<Response> {
     const registry = await this.#registry();
-    return Response.json({ meta: registry.meta(), jobs: registry.jobs() });
+    return Response.json({ meta: registry.meta(), jobs: registry.jobs(), recoveries: registry.recoveries() });
   }
 
   async #registry(initialName?: PackageName): Promise<PackageRegistry> {
