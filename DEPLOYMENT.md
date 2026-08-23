@@ -19,9 +19,14 @@
 The public repository's `Deploy staging` GitHub Actions workflow runs on every
 push to `main`. Configure `CLOUDFLARE_ACCOUNT_ID` and
 `CLOUDFLARE_API_TOKEN` as secrets in the GitHub `staging` environment before
-the first push. Use a user API token scoped to the target account with Account
-Settings (read), Workers Scripts (edit), Workers KV Storage (edit), and
-Workers R2 Storage (edit), plus User Details (read) and Memberships (read).
+the first push. Use a user API token scoped to the target account with:
+
+- Account Settings (read)
+- Workers Containers (write)
+- Workers Scripts (write)
+- Workers KV Storage (write)
+- Workers R2 Storage (write)
+
 These credentials are not checked into the repository.
 
 The initial Container job runner materializes only repositories whose root
