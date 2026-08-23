@@ -13,10 +13,11 @@ as a Cloudflare Container.
 
 ## Why it exists
 
-JSR does not provide a private-repository workflow. Publishing packages is an
-additional step that every project's CI must reproduce before consumers can
-use a revision. `jsrproxy` lets selected GitHub repositories be consumed
-directly, following the same general model as Go's module ecosystem.
+[JSR does not provide a private-repository workflow](https://github.com/jsr-io/jsr/issues/203).
+Publishing packages is an additional step that every project's CI must
+reproduce before consumers can use a revision. `jsrproxy` lets selected GitHub
+repositories be consumed directly, following the same general model as Go's
+module ecosystem.
 
 The goal is to retain JSR's TypeScript-first package experience: type-aware
 packages and zero-configuration ESM consumption, without falling back to the
