@@ -40,7 +40,7 @@ new_sqlite_classes = ["MaterializerContainer"]
 workers_dev = true
 
 [env.staging.vars]
-JSRPROXY_CONFIG = '{"trusted_github_users":["brandonbloom"],"scopes":{"brandonbloom":{"type":"github","owner":"brandonbloom"}}}'
+JSRPROXY_CONFIG = '{"trusted_github_users":["brandonbloom"],"scopes":{"brandonbloom":{"type":"github","owner":"brandonbloom"},"crudetc":{"type":"github","owner":"crudetc"}}}'
 
 [[env.staging.durable_objects.bindings]]
 name = "ADMISSION"

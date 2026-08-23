@@ -1,0 +1,60 @@
+# jsrproxy
+
+`jsrproxy` is an experimental JSR read-through proxy. It preserves ordinary
+[`jsr.io`](https://jsr.io) reads while allowing selected JSR scopes to be
+synthesized from GitHub repositories. A caller supplies a GitHub personal
+access token (PAT); the Worker verifies the caller and repository access,
+discovers the repository's default and `vN` branches, and is intended to
+materialize JSR-compatible artifacts into Cloudflare R2.
+
+The design is documented in [DESIGN.md](DESIGN.md). The deployment components
+are a Cloudflare Worker, Durable Objects, R2, and a Rust materializer packaged
+as a Cloudflare Container.
+
+## Status
+
+This project is experimental. It is only expected to work for Brandon Bloom's
+personal use at this point: the checked-in staging configuration trusts only
+the `brandonbloom` GitHub account and maps only the `@brandonbloom` and
+`@crudetc` scopes. It is not a multi-user service configuration.
+
+The authorization, branch discovery, registry persistence, and R2 serving
+paths are implemented. The Container job runner and GitHub source
+materializer still need to be connected, so a newly observed synthetic package
+returns `503 package materialization pending` rather than package bytes. Reads
+outside configured synthetic scopes fall through to `jsr.io`.
+
+## Development
+
+Prerequisites: Node.js, Deno, Rust, Docker-compatible container tooling, and a
+Cloudflare account with Workers, Durable Objects, R2, and Containers enabled.
+
+```sh
+npm install
+npm test
+npm run check
+cargo test --workspace
+```
+
+The test suite uses no live Cloudflare or GitHub credentials.
+
+## Operating notes
+
+- Configure `AUTH_FINGERPRINT_SECRET` with `npx wrangler secret put
+  AUTH_FINGERPRINT_SECRET`. Do not commit it.
+- Treat `JSRPROXY_CONFIG` as deployment-owned configuration. It controls the
+  trusted GitHub users and synthetic scope-to-owner mappings; update it before
+  making the service available to anyone else.
+- Deploy staging with `npx wrangler deploy --env staging`. The Worker requires
+  the R2 buckets and Container entitlement described in
+  [DEPLOYMENT.md](DEPLOYMENT.md).
+- A client accesses a configured scope by setting `JSR_URL` to the proxy and
+  `DENO_AUTH_TOKENS=<github-pat>@<proxy-host>`. Use an expiring fine-grained
+  PAT with read-only access to the required GitHub repositories. Never put a
+  PAT in a URL, repository file, or log.
+- Requests for configured scopes require the PAT to authenticate as a trusted
+  GitHub user and authorize access to the mapped repository. Other JSR reads
+  do not forward caller credentials to `jsr.io`.
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the deployment checklist and
+[DESIGN.md](DESIGN.md) for the registry and security model.
