@@ -6,6 +6,10 @@ export interface VersionAssignment {
   version: string;
 }
 
+export interface VersionAllocatorSnapshot {
+  assignments: readonly VersionAssignment[];
+}
+
 interface MajorAllocations {
   highWater: number;
   assignments: Map<string, VersionAssignment>;
@@ -38,6 +42,41 @@ export class VersionAllocator {
       throw new Error("cannot recover a commit without an existing assignment");
     }
     return this.#append(allocations, major, commitSha, committedAt, current + 1);
+  }
+
+  /** Produces data suitable for Durable Object storage. */
+  snapshot(): VersionAllocatorSnapshot {
+    return {
+      assignments: [...this.#majors.values()]
+        .flatMap((allocations) => [...allocations.assignments.values()])
+        .sort((left, right) => left.version.localeCompare(right.version)),
+    };
+  }
+
+  /** Recreates an allocator from a Durable Object storage snapshot. */
+  static fromSnapshot(snapshot: VersionAllocatorSnapshot): VersionAllocator {
+    const allocator = new VersionAllocator();
+    for (const assignment of snapshot.assignments) {
+      validateInputs(assignment.major, assignment.commitSha, assignment.sequence);
+      if (!Number.isSafeInteger(assignment.attempt) || assignment.attempt < 0) {
+        throw new Error("assignment attempt must be a non-negative safe integer");
+      }
+      if (assignment.version !== `${assignment.major}.1.${assignment.sequence}`) {
+        throw new Error(`assignment has an invalid version: ${assignment.version}`);
+      }
+      const allocations = allocator.#forMajor(assignment.major);
+      const assignmentKey = key(assignment.commitSha, assignment.attempt);
+      if (allocations.assignments.has(assignmentKey)) {
+        throw new Error(`duplicate assignment: ${assignment.version}`);
+      }
+      allocations.assignments.set(assignmentKey, { ...assignment });
+      allocations.highWater = Math.max(allocations.highWater, assignment.sequence);
+      const currentAttempt = allocations.currentAttempts.get(assignment.commitSha);
+      if (currentAttempt === undefined || assignment.attempt > currentAttempt) {
+        allocations.currentAttempts.set(assignment.commitSha, assignment.attempt);
+      }
+    }
+    return allocator;
   }
 
   #forMajor(major: number): MajorAllocations {

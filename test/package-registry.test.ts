@@ -47,6 +47,17 @@ describe("package registry state", () => {
     });
   });
 
+  test("preserves branch and allocation state across Durable Object storage", () => {
+    const registry = new PackageRegistry({ scope: "acme", name: "widget" });
+    registry.refresh(discovery("first", 100));
+    registry.markReady("0.1.100");
+    const restored = PackageRegistry.fromSnapshot(registry.snapshot());
+
+    const [job] = restored.refresh(discovery("second", 99));
+    assert.equal(job?.version, "0.1.101");
+    assert.deepEqual(restored.meta().versions, { "0.1.100": { yanked: false } });
+  });
+
   test("refuses to mutate immutable published outcomes", () => {
     const registry = new PackageRegistry({ scope: "acme", name: "widget" });
     registry.refresh(discovery("first", 100));

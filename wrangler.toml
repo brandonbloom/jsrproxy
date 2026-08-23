@@ -12,6 +12,55 @@ class_name = "AdmissionDurableObject"
 name = "PACKAGES"
 class_name = "PackageDurableObject"
 
+[[durable_objects.bindings]]
+name = "MATERIALIZER"
+class_name = "MaterializerContainer"
+
+[[containers]]
+class_name = "MaterializerContainer"
+image = "./materializer/Dockerfile"
+image_build_context = "."
+instance_type = "basic"
+max_instances = 4
+
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "jsrproxy-artifacts"
+preview_bucket_name = "jsrproxy-artifacts-preview"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["AdmissionDurableObject", "PackageDurableObject"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["MaterializerContainer"]
+
+[env.staging]
+workers_dev = true
+
+[env.staging.vars]
+JSRPROXY_CONFIG = '{"trusted_github_users":["brandonbloom"],"scopes":{"brandonbloom":{"type":"github","owner":"brandonbloom"}}}'
+
+[[env.staging.durable_objects.bindings]]
+name = "ADMISSION"
+class_name = "AdmissionDurableObject"
+
+[[env.staging.durable_objects.bindings]]
+name = "PACKAGES"
+class_name = "PackageDurableObject"
+
+[[env.staging.durable_objects.bindings]]
+name = "MATERIALIZER"
+class_name = "MaterializerContainer"
+
+[[env.staging.r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "jsrproxy-artifacts-preview"
+
+[[env.staging.containers]]
+class_name = "MaterializerContainer"
+image = "./materializer/Dockerfile"
+image_build_context = "."
+instance_type = "basic"
+max_instances = 4

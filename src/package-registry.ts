@@ -1,5 +1,5 @@
 import { type BranchDiscovery, type BranchState, selectBranches } from "./branches.ts";
-import { type VersionAssignment, VersionAllocator } from "./version-allocator.ts";
+import { type VersionAssignment, type VersionAllocatorSnapshot, VersionAllocator } from "./version-allocator.ts";
 
 export interface PackageName {
   scope: string;
@@ -25,6 +25,18 @@ interface VersionRecord extends MaterializationJob {
   assignment: VersionAssignment;
 }
 
+interface VersionSnapshot extends MaterializationJob {
+  assignment: VersionAssignment;
+}
+
+/** Durable representation of all mutable state owned by one package object. */
+export interface PackageRegistrySnapshot {
+  name: PackageName;
+  branches: BranchState;
+  allocator: VersionAllocatorSnapshot;
+  versions: readonly VersionSnapshot[];
+}
+
 /** A JSR package `meta.json` document. */
 export interface PackageMeta {
   scope: string;
@@ -40,13 +52,41 @@ export interface PackageMeta {
  * Cloudflare API makes their publication behavior directly testable.
  */
 export class PackageRegistry {
-  readonly #allocator = new VersionAllocator();
+  readonly #allocator: VersionAllocator;
   readonly #versions = new Map<string, VersionRecord>();
   readonly name: PackageName;
-  #branches: BranchState = {};
+  #branches: BranchState = { highestObservedReleaseMajor: undefined };
 
-  constructor(name: PackageName) {
+  constructor(name: PackageName, allocator = new VersionAllocator()) {
     this.name = name;
+    this.#allocator = allocator;
+  }
+
+  /** Rehydrates one package registry from Durable Object storage. */
+  static fromSnapshot(snapshot: PackageRegistrySnapshot): PackageRegistry {
+    const registry = new PackageRegistry({ ...snapshot.name }, VersionAllocator.fromSnapshot(snapshot.allocator));
+    registry.#branches = { ...snapshot.branches };
+    for (const version of snapshot.versions) {
+      if (registry.#versions.has(version.version)) throw new Error(`duplicate version: ${version.version}`);
+      registry.#versions.set(version.version, {
+        ...copyJob(version),
+        assignment: { ...version.assignment },
+      });
+    }
+    return registry;
+  }
+
+  /** Returns data suitable for Durable Object storage. */
+  snapshot(): PackageRegistrySnapshot {
+    return {
+      name: { ...this.name },
+      branches: { ...this.#branches },
+      allocator: this.#allocator.snapshot(),
+      versions: [...this.#versions.values()].map((version) => ({
+        ...copyJob(version),
+        assignment: { ...version.assignment },
+      })),
+    };
   }
 
   /** Observes branch tips and creates materialization jobs for new assignments. */
