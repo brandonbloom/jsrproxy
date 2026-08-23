@@ -1,4 +1,6 @@
+use crate::jsr_exports::exports_map_from_json;
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -11,16 +13,9 @@ pub struct SourceConfiguration {
 
 #[derive(Deserialize)]
 struct RawConfiguration {
-    exports: Option<RawExports>,
+    exports: Option<Value>,
     #[serde(default)]
     imports: BTreeMap<String, String>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RawExports {
-    String(String),
-    Map(BTreeMap<String, String>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,8 +23,7 @@ pub enum ConfigError {
     InvalidJson(String),
     MissingExports,
     EmptyExports,
-    InvalidExportKey(String),
-    InvalidExportPath { key: String, path: String },
+    InvalidExports(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -38,13 +32,7 @@ impl fmt::Display for ConfigError {
             Self::InvalidJson(error) => write!(formatter, "invalid root configuration: {error}"),
             Self::MissingExports => formatter.write_str("root configuration has no exports field"),
             Self::EmptyExports => formatter.write_str("root configuration exports is empty"),
-            Self::InvalidExportKey(key) => write!(formatter, "invalid export key: {key}"),
-            Self::InvalidExportPath { key, path } => {
-                write!(
-                    formatter,
-                    "export {key} has an invalid relative path: {path}"
-                )
-            }
+            Self::InvalidExports(error) => formatter.write_str(error),
         }
     }
 }
@@ -58,37 +46,16 @@ impl std::error::Error for ConfigError {}
 pub fn parse_root_configuration(bytes: &[u8]) -> Result<SourceConfiguration, ConfigError> {
     let raw: RawConfiguration = serde_json::from_slice(bytes)
         .map_err(|error| ConfigError::InvalidJson(error.to_string()))?;
-    let exports = match raw.exports {
-        Some(RawExports::String(path)) => BTreeMap::from([(".".to_owned(), path)]),
-        Some(RawExports::Map(exports)) => exports,
-        None => return Err(ConfigError::MissingExports),
-    };
+    if raw.exports.is_none() {
+        return Err(ConfigError::MissingExports);
+    }
+    let exports = exports_map_from_json(raw.exports).map_err(ConfigError::InvalidExports)?;
     if exports.is_empty() {
         return Err(ConfigError::EmptyExports);
-    }
-    for (key, path) in &exports {
-        if key != "." && !key.starts_with("./") {
-            return Err(ConfigError::InvalidExportKey(key.clone()));
-        }
-        if !is_relative_path(path) {
-            return Err(ConfigError::InvalidExportPath {
-                key: key.clone(),
-                path: path.clone(),
-            });
-        }
     }
     Ok(SourceConfiguration {
         exports,
         imports: raw.imports,
-    })
-}
-
-fn is_relative_path(path: &str) -> bool {
-    path.strip_prefix("./").is_some_and(|remainder| {
-        !remainder.is_empty()
-            && !remainder
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
     })
 }
 
@@ -120,7 +87,21 @@ mod tests {
         );
         assert!(matches!(
             parse_root_configuration(br#"{"exports":"../mod.ts"}"#),
-            Err(ConfigError::InvalidExportPath { .. })
+            Err(ConfigError::InvalidExports(_))
         ));
+    }
+
+    #[test]
+    fn rejects_export_maps_that_jsr_rejects() {
+        let error = parse_root_configuration(br#"{"exports":{"bad":"./mod.ts"}}"#).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the key 'bad' must start with a ./, did you mean './bad'?"
+        );
+        let error = parse_root_configuration(br#"{"exports":"./mod"}"#).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the path './mod' for the root export must not end in / and must have a file extension"
+        );
     }
 }

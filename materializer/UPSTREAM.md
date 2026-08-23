@@ -1,7 +1,17 @@
 # Upstream ledger
 
-No upstream Deno or JSR source has been copied into this crate yet.
+This crate contains narrow adaptations of upstream code rather than an upstream
+service. Each entry records the exact reviewed source and local changes.
 
-When a narrow upstream unit is adapted, add an entry recording its source
-repository, path, base commit, license, local modifications, and update
-procedure. Copied license and copyright notices must remain with the source.
+## JSR export-map validation
+
+- Upstream: [`jsr-io/jsr` `api/src/tarball.rs`](https://github.com/jsr-io/jsr/blob/ba17475bff1bbb870ce015866d768284efa44d8c/api/src/tarball.rs), commit `ba17475bff1bbb870ce015866d768284efa44d8c`.
+- License: MIT; the upstream copyright and license notice are retained in
+  `src/jsr_exports.rs`.
+- Local file: `src/jsr_exports.rs`.
+- Adaptation: retain `exports_map_from_json` validation and replace JSR's
+  `IndexMap` and database `ExportsMap` with `BTreeMap`; omit publishing-service
+  integration and upstream tests that depend on that service.
+- Update procedure: compare this function with the recorded upstream commit and
+  its successor, port relevant behavior deliberately, retain the license notice,
+  and extend local tests before updating this record.
