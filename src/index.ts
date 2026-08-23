@@ -100,6 +100,7 @@ async function recoverPackage(
   identity: { scope: string; name: string },
   version: string,
 ): Promise<Response> {
+  if (request.method !== "POST") return new Response("method not allowed", { status: 405, headers: { allow: "POST" } });
   if (!env.RECOVERY_SECRET) return new Response("recovery is not configured", { status: 503 });
   if (request.headers.get("x-jsrproxy-recovery-secret") !== env.RECOVERY_SECRET) return new Response("not found", { status: 404 });
   const body = await request.json().catch(() => undefined) as { reason?: unknown } | undefined;
