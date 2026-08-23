@@ -11,6 +11,17 @@ The design is documented in [DESIGN.md](DESIGN.md). The deployment components
 are a Cloudflare Worker, Durable Objects, R2, and a Rust materializer packaged
 as a Cloudflare Container.
 
+## Why it exists
+
+JSR does not provide a private-repository workflow. Publishing packages is an
+additional step that every project's CI must reproduce before consumers can
+use a revision. `jsrproxy` lets selected GitHub repositories be consumed
+directly, following the same general model as Go's module ecosystem.
+
+The goal is to retain JSR's TypeScript-first package experience: type-aware
+packages and zero-configuration ESM consumption, without falling back to the
+extra package-management configuration commonly needed for npm.
+
 ## Status
 
 This project is experimental. It is only expected to work for Brandon Bloom's
