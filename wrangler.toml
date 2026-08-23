@@ -6,11 +6,11 @@ compatibility_date = "2026-08-22"
 # keeps all registry semantics behind testable storage-independent interfaces.
 [[durable_objects.bindings]]
 name = "ADMISSION"
-class_name = "AdmissionDurableObject"
+class_name = "AdmissionDurableObjectV2"
 
 [[durable_objects.bindings]]
 name = "PACKAGES"
-class_name = "PackageDurableObject"
+class_name = "PackageDurableObjectV2"
 
 [[durable_objects.bindings]]
 name = "MATERIALIZER"
@@ -36,6 +36,13 @@ new_sqlite_classes = ["AdmissionDurableObject", "PackageDurableObject"]
 tag = "v2"
 new_sqlite_classes = ["MaterializerContainer"]
 
+# Staging has no durable state to preserve. Recreate these namespaces so the
+# SQLite-only implementation begins with no prior package or admission records.
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["AdmissionDurableObjectV2", "PackageDurableObjectV2"]
+deleted_classes = ["AdmissionDurableObject", "PackageDurableObject"]
+
 [env.staging]
 workers_dev = true
 
@@ -44,11 +51,11 @@ JSRPROXY_CONFIG = '{"trusted_github_users":["brandonbloom"],"scopes":{"brandonbl
 
 [[env.staging.durable_objects.bindings]]
 name = "ADMISSION"
-class_name = "AdmissionDurableObject"
+class_name = "AdmissionDurableObjectV2"
 
 [[env.staging.durable_objects.bindings]]
 name = "PACKAGES"
-class_name = "PackageDurableObject"
+class_name = "PackageDurableObjectV2"
 
 [[env.staging.durable_objects.bindings]]
 name = "MATERIALIZER"

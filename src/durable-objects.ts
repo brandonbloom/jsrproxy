@@ -41,7 +41,7 @@ interface AdmissionRecord {
  * Shared, secret-free GitHub-user admission cache for one PAT fingerprint.
  * The raw PAT exists only in the request body while GitHub is contacted.
  */
-export class AdmissionDurableObject {
+export class AdmissionDurableObjectV2 {
   private readonly state: DurableState;
   private readonly env: AdmissionEnvironment;
 
@@ -83,7 +83,7 @@ export class AdmissionDurableObject {
   }
 }
 
-export class PackageDurableObject {
+export class PackageDurableObjectV2 {
   private readonly state: DurableState;
   private readonly env: PackageEnvironment;
 
@@ -281,9 +281,7 @@ export class PackageDurableObject {
     const row = first(this.state.storage.sql?.exec<{ snapshot: string }>(
       "SELECT snapshot FROM package_registry WHERE id = 1",
     ));
-    const snapshot = row
-      ? JSON.parse(row.snapshot) as PackageRegistrySnapshot
-      : await this.state.storage.get<PackageRegistrySnapshot>("registry");
+    const snapshot = row ? JSON.parse(row.snapshot) as PackageRegistrySnapshot : undefined;
     if (snapshot) {
       const registry = PackageRegistry.fromSnapshot(snapshot);
       if (initialName && (registry.name.scope !== initialName.scope || registry.name.name !== initialName.name)) {
@@ -296,21 +294,15 @@ export class PackageDurableObject {
   }
 
   /**
-   * Persists one state-machine transition in the Durable Object's SQLite
-   * database. The legacy key is read only to migrate objects written before
-   * this table existed; new state is never written back to that key.
+   * Persists one state-machine transition in this SQLite-only Durable Object.
    */
   async #saveRegistry(registry: PackageRegistry): Promise<void> {
-    const snapshot = registry.snapshot();
     const sql = this.state.storage.sql;
-    if (!sql) {
-      await this.state.storage.put("registry", snapshot);
-      return;
-    }
+    if (!sql) throw new Error("package Durable Object requires SQLite storage");
     this.#ensurePackageSchema();
     sql.exec(
       "INSERT INTO package_registry (id, snapshot) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET snapshot = excluded.snapshot",
-      JSON.stringify(snapshot),
+      JSON.stringify(registry.snapshot()),
     );
   }
 

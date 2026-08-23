@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { AdmissionDurableObject } from "../src/durable-objects.ts";
+import { AdmissionDurableObjectV2 } from "../src/durable-objects.ts";
 
 class MemoryStorage {
   readonly values = new Map<string, unknown>();
@@ -17,7 +17,7 @@ class MemoryStorage {
 describe("admission durable object", () => {
   test("uses GitHub once then serves the unextended cached decision", async () => {
     const storage = new MemoryStorage();
-    const object = new AdmissionDurableObject(
+    const object = new AdmissionDurableObjectV2(
       { storage },
       { JSRPROXY_CONFIG: JSON.stringify({ trusted_github_users: ["trusted"] }) },
     );
@@ -44,7 +44,7 @@ describe("admission durable object", () => {
 
   test("turns GitHub rate limits into a retryable failure without caching them", async () => {
     const storage = new MemoryStorage();
-    const object = new AdmissionDurableObject({ storage }, {});
+    const object = new AdmissionDurableObjectV2({ storage }, {});
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => new Response(null, { status: 429, headers: { "retry-after": "9" } });
     try {

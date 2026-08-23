@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { PackageDurableObject } from "../src/durable-objects.ts";
+import { PackageDurableObjectV2 } from "../src/durable-objects.ts";
 
 class Storage {
   values = new Map<string, unknown>();
@@ -11,7 +11,7 @@ class Storage {
 describe("package authorization durable object", () => {
   test("caches a repository grant by fingerprint without storing its PAT", async () => {
     const storage = new Storage();
-    const object = new PackageDurableObject({ storage });
+    const object = new PackageDurableObjectV2({ storage });
     const originalFetch = globalThis.fetch;
     let calls = 0;
     globalThis.fetch = async (request) => {
@@ -31,7 +31,7 @@ describe("package authorization durable object", () => {
 
   test("rejects an old repository name that GitHub redirects to a renamed repository", async () => {
     const storage = new Storage();
-    const object = new PackageDurableObject({ storage });
+    const object = new PackageDurableObjectV2({ storage });
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => Response.json({ name: "widget-renamed" });
     try {

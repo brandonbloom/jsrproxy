@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, test } from "node:test";
-import { PackageDurableObject } from "../src/durable-objects.ts";
+import { PackageDurableObjectV2 } from "../src/durable-objects.ts";
 
 const digest = (body: string) => createHash("sha256").update(body).digest("hex");
 
@@ -64,7 +64,7 @@ class Bucket {
 
 describe("package registry durable object", () => {
   test("persists a refreshed package and exposes a version only after completion", async () => {
-    const object = new PackageDurableObject({ storage: new Storage() });
+    const object = new PackageDurableObjectV2({ storage: new SqliteStorage() });
     const refresh = () => new Request("https://package.invalid/refresh", {
       method: "POST",
       body: JSON.stringify({
@@ -85,22 +85,9 @@ describe("package registry durable object", () => {
     });
   });
 
-  test("uses SQLite as package-state authority after migrating the legacy snapshot", async () => {
-    const legacyStorage = new Storage();
-    const legacy = new PackageDurableObject({ storage: legacyStorage });
-    const initialRefresh = new Request("https://package.invalid/refresh", {
-      method: "POST",
-      body: JSON.stringify({
-        package: { scope: "acme", name: "widget" },
-        discovery: { defaultBranch: "main", branches: [{ name: "main", sha: "first", committedAt: 100 }] },
-      }),
-    });
-    assert.equal((await legacy.fetch(initialRefresh)).status, 200);
-
+  test("uses SQLite as package-state authority", async () => {
     const storage = new SqliteStorage();
-    const legacySnapshot = legacyStorage.values.get("registry");
-    storage.values.set("registry", legacySnapshot);
-    const object = new PackageDurableObject({ storage });
+    const object = new PackageDurableObjectV2({ storage });
     const refresh = await object.fetch(new Request("https://package.invalid/refresh", {
       method: "POST",
       body: JSON.stringify({
@@ -109,10 +96,10 @@ describe("package registry durable object", () => {
       }),
     }));
     assert.equal(refresh.status, 200);
-    assert.equal(storage.values.get("registry"), legacySnapshot);
+    assert.equal(storage.values.has("registry"), false);
     assert.ok(storage.snapshot?.includes("0.1.100"));
 
-    const rehydrated = new PackageDurableObject({ storage });
+    const rehydrated = new PackageDurableObjectV2({ storage });
     const metadata = await rehydrated.fetch(new Request("https://package.invalid/metadata"));
     assert.deepEqual(await metadata.json(), { scope: "acme", name: "widget", versions: {} });
     assert.ok(storage.queries.some((query) => query.startsWith("CREATE TABLE IF NOT EXISTS package_registry")));
@@ -120,9 +107,9 @@ describe("package registry durable object", () => {
   });
 
   test("leases a pending job to the package Container without persisting its PAT", async () => {
-    const storage = new Storage();
+    const storage = new SqliteStorage();
     const materializer = new Materializer();
-    const object = new PackageDurableObject({ storage }, { MATERIALIZER: materializer, ARTIFACTS: new Bucket() });
+    const object = new PackageDurableObjectV2({ storage }, { MATERIALIZER: materializer, ARTIFACTS: new Bucket() });
     await object.fetch(new Request("https://package.invalid/refresh", {
       method: "POST",
       body: JSON.stringify({
