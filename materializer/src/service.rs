@@ -5,14 +5,18 @@ use crate::tombstone::{TombstoneDiagnostic, build_tombstone};
 use flate2::read::GzDecoder;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::{Cursor, Read};
 use tar::Archive;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
-const MAX_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_SOURCE_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Mirrors the standard JSR publishing limit for a compressed package tarball.
+const MAX_ARCHIVE_BYTES: u64 = 20 * 1024 * 1024;
+/// Mirrors the standard JSR publishing limit for one unpacked package file.
+const MAX_SOURCE_FILE_BYTES: u64 = 20 * 1024 * 1024;
+/// Mirrors the standard JSR publishing limit for all unpacked package files.
+const MAX_TOTAL_SOURCE_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Starts the Container-local HTTP listener used by the owning Durable Object.
 pub fn serve() -> Result<(), std::io::Error> {
@@ -32,16 +36,10 @@ fn handle(request: &mut tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
         return plain_response(404, "not found");
     }
 
-    let mut body = Vec::new();
-    if request
-        .as_reader()
-        .take(MAX_ARCHIVE_BYTES + 1)
-        .read_to_end(&mut body)
-        .is_err()
-        || body.len() as u64 > MAX_ARCHIVE_BYTES
-    {
-        return plain_response(400, "invalid materialization request");
-    }
+    let body = match read_archive_body(request.as_reader()) {
+        Ok(body) => body,
+        Err(()) => return plain_response(400, "invalid materialization request"),
+    };
     let input = match materialization_input(request) {
         Ok(input)
             if valid_source_component(&input.source.owner)
@@ -56,6 +54,18 @@ fn handle(request: &mut tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
         Ok(outcome) => json_response(200, &outcome),
         Err(error) => plain_response(503, &error.message()),
     }
+}
+
+fn read_archive_body(reader: &mut (impl Read + ?Sized)) -> Result<Vec<u8>, ()> {
+    let mut body = Vec::new();
+    reader
+        .take(MAX_ARCHIVE_BYTES + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| ())?;
+    if body.len() as u64 > MAX_ARCHIVE_BYTES {
+        return Err(());
+    }
+    Ok(body)
 }
 
 fn run_materialization(
@@ -172,6 +182,7 @@ fn source_package(
         )
     })?;
     files.insert("deno.json".to_owned(), package_config);
+    validate_output_limits(&files)?;
     Ok((
         files
             .into_iter()
@@ -271,6 +282,9 @@ fn unpack_archive(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, SourceFailu
     let decoder = GzDecoder::new(bytes);
     let mut archive = Archive::new(decoder);
     let mut files = BTreeMap::new();
+    let mut archive_root: Option<String> = None;
+    let mut case_insensitive_paths = HashMap::new();
+    let mut total_size = 0_u64;
     for entry in archive.entries().map_err(|_| {
         SourceFailure::new(
             "invalid-source-archive",
@@ -285,21 +299,53 @@ fn unpack_archive(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, SourceFailu
                 None,
             )
         })?;
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
-        let path = entry.path().map_err(|_| {
+        let path = entry.path_bytes();
+        let path = std::str::from_utf8(&path).map_err(|_| {
             SourceFailure::new(
                 "invalid-source-archive",
-                "GitHub returned an invalid source path",
+                "GitHub returned a source path that is not UTF-8",
                 None,
             )
         })?;
-        let path = path.to_string_lossy();
+        let path = path.trim_end_matches('/');
         let mut parts = path.split('/');
-        let _archive_root = parts.next();
+        let root = parts
+            .next()
+            .filter(|part| !part.is_empty())
+            .ok_or_else(|| {
+                SourceFailure::new(
+                    "invalid-source-archive",
+                    "GitHub returned a source path without an archive root",
+                    None,
+                )
+            })?;
+        if matches!(root, "." | "..") {
+            return Err(SourceFailure::new(
+                "invalid-source-archive",
+                "GitHub returned an unsafe archive root",
+                None,
+            ));
+        }
+        if let Some(expected_root) = &archive_root {
+            if expected_root != root {
+                return Err(SourceFailure::new(
+                    "invalid-source-archive",
+                    "GitHub returned source files from multiple archive roots",
+                    None,
+                ));
+            }
+        } else {
+            archive_root = Some(root.to_owned());
+        }
         let relative: Vec<&str> = parts.collect();
         if relative.is_empty() {
+            if entry.header().entry_type().is_file() {
+                return Err(SourceFailure::new(
+                    "invalid-source-archive",
+                    "GitHub returned a source file at the archive root",
+                    None,
+                ));
+            }
             continue;
         }
         if relative
@@ -313,6 +359,45 @@ fn unpack_archive(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, SourceFailu
             ));
         }
         let relative = relative.join("/");
+        validate_package_path(&relative)?;
+        if entry.header().entry_type().is_dir() {
+            continue;
+        }
+        if !entry.header().entry_type().is_file() {
+            return Err(SourceFailure::new(
+                "invalid-source-archive",
+                "GitHub returned a source archive containing a link or unsupported entry",
+                None,
+            ));
+        }
+        let size = entry.header().size().map_err(|_| {
+            SourceFailure::new(
+                "invalid-source-archive",
+                "GitHub returned an unreadable source file header",
+                None,
+            )
+        })?;
+        if size > MAX_SOURCE_FILE_BYTES {
+            return Err(SourceFailure::new(
+                "source-file-too-large",
+                "a source file exceeds the materializer limit",
+                None,
+            ));
+        }
+        total_size = total_size.checked_add(size).ok_or_else(|| {
+            SourceFailure::new(
+                "source-package-too-large",
+                "the source package exceeds the materializer limit",
+                None,
+            )
+        })?;
+        if total_size > MAX_TOTAL_SOURCE_BYTES {
+            return Err(SourceFailure::new(
+                "source-package-too-large",
+                "the source package exceeds the materializer limit",
+                None,
+            ));
+        }
         let mut contents = Vec::new();
         entry
             .take(MAX_SOURCE_FILE_BYTES + 1)
@@ -324,10 +409,20 @@ fn unpack_archive(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, SourceFailu
                     None,
                 )
             })?;
-        if contents.len() as u64 > MAX_SOURCE_FILE_BYTES {
+        if contents.len() as u64 != size {
             return Err(SourceFailure::new(
-                "source-file-too-large",
-                "a source file exceeds the materializer limit",
+                "invalid-source-archive",
+                "GitHub returned a truncated source file",
+                None,
+            ));
+        }
+        let case_insensitive = relative.to_lowercase();
+        if let Some(existing) = case_insensitive_paths.insert(case_insensitive, relative.clone()) {
+            return Err(SourceFailure::new(
+                "invalid-source-archive",
+                format!(
+                    "GitHub returned case-insensitive duplicate source paths: {existing} and {relative}"
+                ),
                 None,
             ));
         }
@@ -340,6 +435,103 @@ fn unpack_archive(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, SourceFailu
         }
     }
     Ok(files)
+}
+
+fn validate_output_limits(files: &BTreeMap<String, Vec<u8>>) -> Result<(), SourceFailure> {
+    let mut case_insensitive_paths = HashMap::new();
+    let total_size = files.iter().try_fold(0_u64, |total, (path, contents)| {
+        validate_package_path(path)?;
+        let case_insensitive = path.to_ascii_lowercase();
+        if let Some(existing) = case_insensitive_paths.insert(case_insensitive, path) {
+            return Err(SourceFailure::new(
+                "invalid-source-archive",
+                format!(
+                    "generated package has case-insensitive duplicate paths: {existing} and {path}"
+                ),
+                None,
+            ));
+        }
+        let size = contents.len() as u64;
+        if size > MAX_SOURCE_FILE_BYTES {
+            return Err(SourceFailure::new(
+                "source-file-too-large",
+                "a generated package file exceeds the materializer limit",
+                None,
+            ));
+        }
+        total.checked_add(size).ok_or_else(|| {
+            SourceFailure::new(
+                "source-package-too-large",
+                "the generated package exceeds the materializer limit",
+                None,
+            )
+        })
+    })?;
+    if total_size > MAX_TOTAL_SOURCE_BYTES {
+        return Err(SourceFailure::new(
+            "source-package-too-large",
+            "the generated package exceeds the materializer limit",
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_package_path(path: &str) -> Result<(), SourceFailure> {
+    let components: Vec<&str> = path.split('/').collect();
+    let valid_component = |component: &str| {
+        component.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'$' | b'('
+                        | b')'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'@'
+                        | b'['
+                        | b']'
+                        | b'_'
+                        | b'{'
+                        | b'}'
+                        | b'~'
+                )
+        })
+    };
+    let reserved = [
+        "aux", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "con",
+        "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9", "nul", "prn",
+    ];
+    let invalid = path.len() > 154
+        || components.is_empty()
+        || components.iter().any(|component| {
+            component.is_empty()
+                || matches!(*component, "." | "..")
+                || component.ends_with('.')
+                || !valid_component(component)
+                || reserved.contains(
+                    &component
+                        .rsplit_once('.')
+                        .map_or(*component, |(name, _)| name)
+                        .to_ascii_lowercase()
+                        .as_str(),
+                )
+        })
+        || components
+            .last()
+            .is_some_and(|component| component.len() > 95)
+        || components.first().is_some_and(|component| {
+            component.eq_ignore_ascii_case(".git") || component.eq_ignore_ascii_case("_dist")
+        });
+    if invalid {
+        return Err(SourceFailure::new(
+            "invalid-source-archive",
+            format!("source path is outside the accepted JSR publishing subset: {path}"),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn emitted_configuration(
@@ -585,6 +777,139 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure.failure_class, "invalid-root-config");
         assert!(failure.message.contains("no exports"));
+    }
+
+    #[test]
+    fn rejects_case_insensitive_duplicate_source_paths() {
+        let failure = source_package(
+            &archive(&[
+                ("deno.json", br#"{"exports":"./mod.ts"}"#),
+                ("mod.ts", b"export {};\n"),
+                ("Mod.ts", b"export {};\n"),
+            ]),
+            &request(),
+        )
+        .unwrap_err();
+        assert_eq!(failure.failure_class, "invalid-source-archive");
+        assert!(failure.message.contains("case-insensitive duplicate"));
+    }
+
+    #[test]
+    fn accepts_github_style_directory_headers() {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut tar = Builder::new(encoder);
+        let mut directory = tar::Header::new_gnu();
+        directory.set_entry_type(tar::EntryType::Directory);
+        directory.set_size(0);
+        directory.set_mode(0o755);
+        directory.set_cksum();
+        tar.append_data(&mut directory, "repo-sha/", std::io::empty())
+            .unwrap();
+        let contents = br#"{"exports":"./mod.ts"}"#;
+        let mut file = tar::Header::new_gnu();
+        file.set_size(contents.len() as u64);
+        file.set_mode(0o644);
+        file.set_cksum();
+        tar.append_data(&mut file, "repo-sha/deno.json", &contents[..])
+            .unwrap();
+        let contents = b"export {};\n";
+        let mut file = tar::Header::new_gnu();
+        file.set_size(contents.len() as u64);
+        file.set_mode(0o644);
+        file.set_cksum();
+        tar.append_data(&mut file, "repo-sha/mod.ts", &contents[..])
+            .unwrap();
+        let archive = tar.into_inner().unwrap().finish().unwrap();
+
+        assert!(source_package(&archive, &request()).is_ok());
+    }
+
+    #[test]
+    fn rejects_compressed_archives_over_the_limit() {
+        let body = vec![0; MAX_ARCHIVE_BYTES as usize + 1];
+        assert_eq!(read_archive_body(&mut Cursor::new(body)), Err(()));
+    }
+
+    #[test]
+    fn rejects_source_files_over_the_limit() {
+        let contents = vec![0; MAX_SOURCE_FILE_BYTES as usize + 1];
+        let failure = unpack_archive(&archive(&[("mod.ts", &contents)])).unwrap_err();
+        assert_eq!(failure.failure_class, "source-file-too-large");
+    }
+
+    #[test]
+    fn rejects_generated_packages_over_the_total_limit() {
+        let files = BTreeMap::from([
+            (
+                "first.ts".to_owned(),
+                vec![0; MAX_TOTAL_SOURCE_BYTES as usize / 2],
+            ),
+            (
+                "second.ts".to_owned(),
+                vec![0; MAX_TOTAL_SOURCE_BYTES as usize / 2 + 1],
+            ),
+        ]);
+        let failure = validate_output_limits(&files).unwrap_err();
+        assert_eq!(failure.failure_class, "source-package-too-large");
+    }
+
+    #[test]
+    fn rejects_paths_outside_the_jsr_publishing_subset() {
+        let failure = source_package(
+            &archive(&[
+                ("deno.json", br#"{"exports":"./mod.ts"}"#),
+                ("src/has space.ts", b"export {};\n"),
+                ("mod.ts", b"export {};\n"),
+            ]),
+            &request(),
+        )
+        .unwrap_err();
+        assert_eq!(failure.failure_class, "invalid-source-archive");
+        assert!(failure.message.contains("accepted JSR publishing subset"));
+    }
+
+    #[test]
+    fn rejects_case_collisions_created_by_the_emitted_configuration() {
+        let failure = source_package(
+            &archive(&[
+                ("jsr.json", br#"{"exports":"./mod.ts"}"#),
+                ("Deno.json", b"{}\n"),
+                ("mod.ts", b"export {};\n"),
+            ]),
+            &request(),
+        )
+        .unwrap_err();
+        assert_eq!(failure.failure_class, "invalid-source-archive");
+        assert!(
+            failure
+                .message
+                .contains("generated package has case-insensitive duplicate")
+        );
+    }
+
+    #[test]
+    fn rejects_links_in_source_archives() {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut tar = Builder::new(encoder);
+        let contents = br#"{"exports":"./mod.ts"}"#;
+        let mut file = tar::Header::new_gnu();
+        file.set_size(contents.len() as u64);
+        file.set_mode(0o644);
+        file.set_cksum();
+        tar.append_data(&mut file, "repo-sha/deno.json", &contents[..])
+            .unwrap();
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_size(0);
+        link.set_link_name("mod.ts").unwrap();
+        link.set_cksum();
+        tar.append_data(&mut link, "repo-sha/link.ts", std::io::empty())
+            .unwrap();
+        let archive = tar.into_inner().unwrap().finish().unwrap();
+
+        let failure = source_package(&archive, &request()).unwrap_err();
+        assert_eq!(failure.failure_class, "invalid-source-archive");
+        assert!(failure.message.contains("link or unsupported entry"));
     }
 
     #[test]

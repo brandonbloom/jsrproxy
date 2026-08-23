@@ -19,7 +19,7 @@ root import-map rewriting are implemented.
 - [ ] Stream archive input and materializer output with bounded resource use;
   remove the in-memory base64 artifact batch protocol before supporting larger
   repositories.
-- [ ] Impose and test archive, per-file, total-output, path-normalization, and
+- [x] Impose and test archive, per-file, total-output, path-normalization, and
   case-collision limits equivalent to the accepted JSR publishing subset.
 
 ## P0 — Publish-compatible materialization
