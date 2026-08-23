@@ -27,6 +27,16 @@ Full Deno publish-compatible graph walking and specifier rewriting are still
 in progress. Reads outside configured synthetic scopes fall through to
 `jsr.io`.
 
+## Security model
+
+For a configured scope, `jsrproxy` verifies the caller's GitHub PAT and
+forwards it to GitHub to read the mapped repository. Durable state retains
+only a non-reversible fingerprint and logs redact the credential, but the
+proxy still handles the PAT on every such request. Its operator and deployment
+therefore must be trusted with callers' repository access. This is suitable
+for a personal or tightly administered deployment, not a public service for
+the commons or an untrusted multi-user registry.
+
 ## Development
 
 Prerequisites: Node.js, Deno, Rust, Docker-compatible container tooling, and a
