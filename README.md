@@ -30,24 +30,29 @@ personal use at this point: the checked-in staging configuration trusts only
 the `brandonbloom` GitHub account and maps only the `@brandonbloom` and
 `@crudetc` scopes. It is not a multi-user service configuration.
 
-The authorization, branch discovery, registry persistence, R2 serving, and
-Container job-dispatch paths are implemented. The initial source materializer
-supports repositories with a root `deno.json` or `jsr.json` that declares
-exports and does not need import-map rewriting. Other deterministic source
+Authorization, branch discovery, registry persistence, R2 serving, and
+Container job dispatch are implemented. The materializer accepts a root
+`deno.json` or `jsr.json` with exports and rewrites its direct quoted import-map
+aliases to relative, `jsr:`, or `npm:` specifiers. Other deterministic source
 errors produce a yanked tombstone; infrastructure failures remain pending.
-Full Deno publish-compatible graph walking and specifier rewriting are still
-in progress. Reads outside configured synthetic scopes fall through to
+Full `deno publish`-compatible graph walking and specifier rewriting are still
+out of scope. Reads outside configured synthetic scopes fall through to
 `jsr.io`.
 
 ## Security model
 
-For a configured scope, `jsrproxy` verifies the caller's GitHub PAT and
-forwards it to GitHub to read the mapped repository. Durable state retains
-only a non-reversible fingerprint and logs redact the credential, but the
-proxy still handles the PAT on every such request. Its operator and deployment
-therefore must be trusted with callers' repository access. This is suitable
-for a personal or tightly administered deployment, not a public service for
-the commons or an untrusted multi-user registry.
+For a configured scope, `jsrproxy` verifies the caller's GitHub PAT and uses
+it only in the Worker to read the mapped repository's pinned source archive.
+Durable state retains only a non-reversible fingerprint. The Container receives
+the archive and credential-free job context with network access disabled; the
+Package Durable Object verifies the materializer's hashes and writes immutable
+artifacts to private R2. The PAT is not stored in Durable Objects, R2, the
+Cache API, Container input, or logs.
+
+The proxy still handles the PAT on every configured-scope request, so its
+operator and deployment must be trusted with callers' repository access. This
+is suitable for a personal or tightly administered deployment, not a public
+service for the commons or an untrusted multi-user registry.
 
 ## Development
 
@@ -80,6 +85,10 @@ The test suite uses no live Cloudflare or GitHub credentials.
 - Requests for configured scopes require the PAT to authenticate as a trusted
   GitHub user and authorize access to the mapped repository. Other JSR reads
   do not forward caller credentials to `jsr.io`.
+- `?recover=true` on a package metadata request starts replacement attempts for
+  published outcomes after a confirmed proxy repair. It is an experimental
+  operator control in this personal deployment; it preserves old immutable
+  artifacts and allocates fresh versions.
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for the deployment checklist and
 [DESIGN.md](DESIGN.md) for the registry and security model.

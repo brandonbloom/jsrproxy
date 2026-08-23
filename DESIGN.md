@@ -80,10 +80,10 @@ deno ──JSR_URL──> Worker + bounded isolate auth cache ──> jsr.io (fa
                     ├──> Admission Durable Object (per PAT fingerprint)
                     └──> Package Durable Object (per package)
                            ├── SQLite (branches, versions, jobs, repo auth)
-                           └── Cloudflare Container
-                                  └── native Rust materializer
-                                         ├──> GitHub (caller's PAT)
-                                         └──> R2 via Worker binding
+                           ├──> GitHub (Worker fetches with caller's PAT)
+                           ├──> Cloudflare Container (credential-free archive)
+                           │      └── native Rust materializer
+                           └──> R2 (verified immutable artifacts)
 ```
 
 The production deployment uses four Cloudflare primitives:
@@ -110,12 +110,12 @@ Production therefore requires the Workers Paid plan; Cloudflare Containers are
 not available on the Free plan.
 
 The Worker and Durable Object are a small TypeScript control plane. Registry
-semantics and materialization remain in Rust where practical. The Container
-accesses R2 through an outbound Worker handler and binding rather than holding
-S3 credentials. The Worker uses the caller's GitHub PAT to fetch a pinned
-source archive, then sends the archive and credential-free job context to the
-Container. The PAT is never written to Durable Object storage, R2, the Cache
-API, Container input, or logs.
+semantics and materialization remain in Rust where practical. The Worker uses
+the caller's GitHub PAT to fetch a pinned source archive, then sends the
+archive and credential-free job context to a network-disabled Container. The
+Container returns hashes and artifact bytes; the Package Durable Object verifies
+them and writes to its private R2 binding. The PAT is never written to Durable
+Object storage, R2, the Cache API, Container input, or logs.
 
 Start with the `basic` Container instance type and benchmark representative
 packages before lowering or raising it. Configure an explicit `max_instances`
@@ -467,9 +467,9 @@ produces either the source artifact or an immutable yanked failure tombstone.
    transaction.
 2. In the same transaction, insert a pending job containing the branch name,
    commit SHA, major, and version. Do not expose the version in `meta.json`.
-3. Start the package's Container and submit the job and caller's PAT to the Rust
-   process in memory.
-4. Fetch the Git tree tarball at the recorded SHA.
+3. Fetch the Git tree tarball at the recorded SHA with the caller's PAT.
+4. Start the package's Container and submit the archive plus credential-free
+   job context to the Rust process.
 5. Apply `include`/`exclude` and `.gitignore` semantics as `deno publish` does.
 6. Read the repository-root `deno.json` / `jsr.json` for `exports`, `imports`,
    and optional source `name` and `version`. Honor both string and object forms
@@ -485,8 +485,9 @@ produces either the source artifact or an immutable yanked failure tombstone.
    Reject external imports that are not `jsr:`, `npm:`, `data:`, `bun:`, or
    `node:`.
 9. Hash each output with SHA-256 in hexadecimal.
-10. Stream the files and `<version>_meta.json` through the Container's outbound
-    Worker handler into R2 using create-if-absent writes.
+10. Return files and `<version>_meta.json` with SHA-256 digests to the Package
+    Durable Object, which verifies and writes them to R2 using create-if-absent
+    writes.
 11. After every object has been verified, write an immutable R2 ready marker
     containing the manifest hash. The Worker refuses every concrete-version path
     whose marker is absent.
@@ -553,13 +554,11 @@ assignment pointer, and creates a new pending job. The original version and
 tombstone bytes remain immutable and yanked. If recovery succeeds, the new
 non-yanked version becomes selectable normally.
 
-The recovery control is outside all public HTTP routes and requires deployment
-administrator authentication. Record the administrator identity, timestamp,
-original tombstone version and diagnostic, replacement version, and written
-reason in an append-only audit record. Normal callers cannot request, trigger,
-or influence recovery beyond reporting a suspected proxy defect to the
-administrator. Recovery neither supplies a GitHub credential nor bypasses
-repository authorization; the next normally authorized package request provides
+The experimental personal deployment exposes recovery as `?recover=true` on an
+otherwise authorized package-metadata request. It is not appropriate for a
+multi-user deployment: production use needs a separate deployment-administrator
+control with an audit record. Recovery neither supplies a GitHub credential nor
+bypasses repository authorization; the next authorized package request provides
 the PAT that runs the pending replacement job.
 
 ### 8.2 Upstream-derived Rust implementation

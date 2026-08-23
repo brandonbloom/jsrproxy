@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, test } from "node:test";
-import { publishArtifact } from "../src/r2-publication.ts";
+import { publishArtifact, publishArtifactBatch } from "../src/r2-publication.ts";
 
 const digest = (body: string) => createHash("sha256").update(body).digest("hex");
 
@@ -40,5 +40,26 @@ describe("R2 artifact publication", () => {
     assert.equal((await publishArtifact(bucket, new Request(key, { method: "PUT", headers: { "x-jsrproxy-sha256": digest("expected") }, body: "received" }))).status, 422);
     assert.equal((await publishArtifact(bucket, new Request(key, { method: "PUT", headers: { "x-jsrproxy-sha256": digest("one") }, body: "one" }))).status, 201);
     assert.equal((await publishArtifact(bucket, new Request(key, { method: "PUT", headers: { "x-jsrproxy-sha256": digest("two") }, body: "two" }))).status, 409);
+  });
+
+  test("writes a batch in order and rejects malformed entries", async () => {
+    const bucket = new MemoryBucket();
+    const body = "export const answer = 42;\n";
+    const marker = '{"manifest_sha256":"example"}';
+    const batch = new Request("http://artifacts.r2/batch", {
+      method: "PUT",
+      body: JSON.stringify({
+        uploads: [
+          { key: "synthetic/acme/widget/1.1.42/mod.ts", sha256: digest(body), body: btoa(body) },
+          { key: "synthetic/acme/widget/1.1.42.ready.json", sha256: digest(marker), body: btoa(marker) },
+        ],
+      }),
+    });
+    assert.equal((await publishArtifactBatch(bucket, batch)).status, 204);
+    assert.deepEqual([...bucket.objects.keys()], [
+      "synthetic/acme/widget/1.1.42/mod.ts",
+      "synthetic/acme/widget/1.1.42.ready.json",
+    ]);
+    assert.equal((await publishArtifactBatch(bucket, new Request("http://artifacts.r2/batch", { method: "PUT", body: "{}" }))).status, 400);
   });
 });

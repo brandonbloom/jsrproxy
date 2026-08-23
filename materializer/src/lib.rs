@@ -9,9 +9,7 @@ pub mod publication;
 pub mod service;
 pub mod tombstone;
 
-pub use job::{
-    MaterializationJob, MaterializationRequest, PackageIdentity, SourceRepository,
-};
+pub use job::{MaterializationJob, MaterializationRequest, PackageIdentity, SourceRepository};
 pub use publication::{
     ArtifactFile, ArtifactStore, ManifestEntry, PackageMetadata, PublicationError,
     PublicationResult, publish,

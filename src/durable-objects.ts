@@ -2,6 +2,7 @@ import { classifyGitHubResponse, githubRequest } from "./auth.ts";
 import { type BranchDiscovery } from "./branches.ts";
 import { parseConfig } from "./config.ts";
 import { type PackageName, PackageRegistry, type PackageRegistrySnapshot, type TombstoneDiagnostic } from "./package-registry.ts";
+import { publishArtifactBatch, type R2PublicationBucket } from "./r2-publication.ts";
 
 interface DurableStorage {
   get<T>(key: string): Promise<T | undefined>;
@@ -23,6 +24,7 @@ interface MaterializerNamespace {
 
 interface PackageEnvironment {
   MATERIALIZER?: MaterializerNamespace;
+  ARTIFACTS?: R2PublicationBucket;
 }
 
 interface AdmissionRecord {
@@ -124,12 +126,12 @@ export class PackageDurableObject {
   }
 
   async #refresh(request: Request): Promise<Response> {
-    const body = await request.json().catch(() => undefined) as { package?: unknown; discovery?: unknown } | undefined;
+    const body = await request.json().catch(() => undefined) as { package?: unknown; discovery?: unknown; recover?: unknown } | undefined;
     const name = parsePackageName(body?.package);
     const discovery = parseDiscovery(body?.discovery);
     if (!name || !discovery) return new Response("invalid package refresh", { status: 400 });
     const registry = await this.#registry(name);
-    const created = registry.refresh(discovery);
+    const created = [...registry.refresh(discovery), ...(body?.recover === true ? registry.recoverYanked() : [])];
     await this.state.storage.put("registry", registry.snapshot());
     return Response.json({ meta: registry.meta(), jobs: registry.jobs(), created });
   }
@@ -168,7 +170,7 @@ export class PackageDurableObject {
     ) {
       return new Response("invalid materialization request", { status: 400 });
     }
-    if (!this.env.MATERIALIZER) return new Response("materializer is not configured", { status: 503 });
+    if (!this.env.MATERIALIZER || !this.env.ARTIFACTS) return new Response("materializer is not configured", { status: 503 });
 
     const registry = await this.#registry();
     const job = registry.leaseNext();
@@ -212,9 +214,13 @@ export class PackageDurableObject {
       console.warn("materializer returned an error", response.status, reason);
       return this.#releaseLease(job.version);
     }
-
     const outcome = parseMaterializationOutcome(await response.json().catch(() => undefined));
     if (!outcome) return this.#releaseLease(job.version);
+    const publication = await publishArtifactBatch(this.env.ARTIFACTS, new Request("https://artifacts.internal/batch", {
+      method: "PUT",
+      body: JSON.stringify({ uploads: outcome.uploads }),
+    }));
+    if (!publication.ok) return this.#releaseLease(job.version);
     const completed = await this.#registry();
     try {
       if (outcome.state === "ready") completed.markReady(job.version);
@@ -312,13 +318,26 @@ function parseDiagnostic(value: unknown): TombstoneDiagnostic | undefined {
     : undefined;
 }
 
+interface MaterializedArtifact {
+  key: string;
+  sha256: string;
+  body: string;
+}
+
 function parseMaterializationOutcome(value: unknown):
-  | { state: "ready" }
-  | { state: "yanked"; diagnostic: TombstoneDiagnostic }
+  | { state: "ready"; uploads: MaterializedArtifact[] }
+  | { state: "yanked"; diagnostic: TombstoneDiagnostic; uploads: MaterializedArtifact[] }
   | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const { state, diagnostic } = value as { state?: unknown; diagnostic?: unknown };
-  if (state === "ready") return { state };
+  const { state, diagnostic, uploads } = value as { state?: unknown; diagnostic?: unknown; uploads?: unknown };
+  if (!Array.isArray(uploads) || uploads.length === 0 || uploads.some((upload) => !validMaterializedArtifact(upload))) return undefined;
+  if (state === "ready") return { state, uploads: uploads as MaterializedArtifact[] };
   const parsedDiagnostic = parseDiagnostic(diagnostic);
-  return state === "yanked" && parsedDiagnostic ? { state, diagnostic: parsedDiagnostic } : undefined;
+  return state === "yanked" && parsedDiagnostic ? { state, diagnostic: parsedDiagnostic, uploads: uploads as MaterializedArtifact[] } : undefined;
+}
+
+function validMaterializedArtifact(value: unknown): value is MaterializedArtifact {
+  if (!value || typeof value !== "object") return false;
+  const { key, sha256, body } = value as { key?: unknown; sha256?: unknown; body?: unknown };
+  return typeof key === "string" && typeof sha256 === "string" && typeof body === "string";
 }

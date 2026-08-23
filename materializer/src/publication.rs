@@ -118,7 +118,7 @@ pub fn publish(
             size: file.bytes.len(),
             checksum: format!("sha256-{checksum}"),
         };
-        if manifest.insert(file.path.clone(), entry).is_some() {
+        if manifest.insert(format!("/{}", file.path), entry).is_some() {
             return Err(PublicationError::DuplicatePath(file.path));
         }
         let key = format!("{base}/{}", file.path);
@@ -253,7 +253,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            result.metadata.manifest["mod.ts"].checksum,
+            result.metadata.manifest["/mod.ts"].checksum,
             "sha256-5bebe5892144e93811698b7ea8f0b449227c33d057fd3c08294e32e94fe2524a"
         );
         assert_eq!(content_type("mod.ts"), "application/typescript");
@@ -300,5 +300,4 @@ mod tests {
         .unwrap_err();
         assert_eq!(error, PublicationError::InvalidPath("../secret.ts".into()));
     }
-
 }

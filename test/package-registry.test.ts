@@ -47,6 +47,23 @@ describe("package registry state", () => {
     });
   });
 
+  test("allocates an explicit replacement attempt for yanked versions", () => {
+    const registry = new PackageRegistry({ scope: "acme", name: "widget" });
+    registry.refresh(discovery("broken", 100));
+    registry.markYanked("0.1.100", { id: "mat-1", failureClass: "source", message: "fixed later" });
+    assert.deepEqual(registry.recoverYanked().map((job) => job.version), ["0.1.101"]);
+    assert.equal(registry.jobs().find((job) => job.version === "0.1.101")?.state, "pending");
+  });
+
+  test("allocates an explicit replacement attempt for a ready version", () => {
+    const registry = new PackageRegistry({ scope: "acme", name: "widget" });
+    registry.refresh(discovery("first", 100));
+    registry.markReady("0.1.100");
+
+    assert.deepEqual(registry.recoverYanked().map((job) => job.version), ["0.1.101"]);
+    assert.equal(registry.jobs().find((job) => job.version === "0.1.101")?.state, "pending");
+  });
+
   test("preserves branch and allocation state across Durable Object storage", () => {
     const registry = new PackageRegistry({ scope: "acme", name: "widget" });
     registry.refresh(discovery("first", 100));

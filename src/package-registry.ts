@@ -115,6 +115,37 @@ export class PackageRegistry {
     return created;
   }
 
+  /** Allocates replacement attempts for published outcomes after an explicit repair. */
+  recoverYanked(): readonly MaterializationJob[] {
+    const recovered: MaterializationJob[] = [];
+    const latest = new Map<string, VersionRecord>();
+    for (const record of this.#versions.values()) {
+      const existing = latest.get(record.commitSha);
+      if (!existing || record.assignment.attempt > existing.assignment.attempt) {
+        latest.set(record.commitSha, record);
+      }
+    }
+    for (const record of latest.values()) {
+      if (record.state !== "yanked" && record.state !== "ready") continue;
+      const assignment = this.#allocator.recover(
+        record.major,
+        record.commitSha,
+        record.assignment.sequence,
+      );
+      const replacement: VersionRecord = {
+        assignment,
+        branch: record.branch,
+        commitSha: record.commitSha,
+        major: record.major,
+        version: assignment.version,
+        state: "pending",
+      };
+      this.#versions.set(replacement.version, replacement);
+      recovered.push(copyJob(replacement));
+    }
+    return recovered;
+  }
+
   /** Marks a complete artifact set ready after its R2 ready marker exists. */
   markReady(version: string): void {
     const record = this.#requirePending(version);

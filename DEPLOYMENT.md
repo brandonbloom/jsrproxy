@@ -29,7 +29,6 @@ the first push. Use a user API token scoped to the target account with:
 
 These credentials are not checked into the repository.
 
-The initial Container job runner materializes only repositories whose root
-configuration declares exports without requiring import-map rewriting. Full
-Deno publish-compatible graph walking and specifier rewriting remain to be
-implemented.
+The materializer supports root configurations that declare exports and direct
+quoted root import-map aliases. Full Deno publish-compatible graph walking and
+specifier rewriting remain to be implemented.

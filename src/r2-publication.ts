@@ -17,6 +17,12 @@ export interface R2PublicationBucket {
   ): Promise<R2StoredObject | null>;
 }
 
+interface BatchedArtifact {
+  key: unknown;
+  sha256: unknown;
+  body: unknown;
+}
+
 /**
  * Accepts one immutable materializer upload through the Container outbound
  * handler. A retried upload succeeds only when the existing R2 object has the
@@ -47,6 +53,41 @@ export async function publishArtifact(
   const existing = await bucket.head(key);
   if (existing?.customMetadata?.sha256 === expected) return new Response(null, { status: 200 });
   return new Response("artifact key already exists with different bytes", { status: 409 });
+}
+
+/**
+ * Publishes a complete materialization through one Container outbound request.
+ * The ready marker remains the final item, so partial uploads are unreachable.
+ */
+export async function publishArtifactBatch(
+  bucket: R2PublicationBucket,
+  request: Request,
+): Promise<Response> {
+  if (request.method !== "PUT" || new URL(request.url).pathname !== "/batch") {
+    return new Response("not found", { status: 404 });
+  }
+  const body = await request.json().catch(() => undefined) as { uploads?: unknown } | undefined;
+  if (!Array.isArray(body?.uploads) || body.uploads.length === 0) {
+    return new Response("invalid artifact batch", { status: 400 });
+  }
+  for (const upload of body.uploads as BatchedArtifact[]) {
+    if (typeof upload.key !== "string" || typeof upload.sha256 !== "string" || typeof upload.body !== "string") {
+      return new Response("invalid artifact batch", { status: 400 });
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = Uint8Array.from(atob(upload.body), (character) => character.charCodeAt(0));
+    } catch {
+      return new Response("invalid artifact body", { status: 400 });
+    }
+    const response = await publishArtifact(bucket, new Request(`http://artifacts.r2/${upload.key}`, {
+      method: "PUT",
+      headers: { [SHA256_HEADER]: upload.sha256 },
+      body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+    }));
+    if (!response.ok) return response;
+  }
+  return new Response(null, { status: 204 });
 }
 
 function artifactKey(pathname: string): string | undefined {

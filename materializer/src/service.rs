@@ -3,7 +3,6 @@ use crate::job::{MaterializationJob, MaterializationRequest, SourceRepository};
 use crate::publication::{ArtifactFile, ArtifactStore, StoreError, publish};
 use crate::tombstone::{TombstoneDiagnostic, build_tombstone};
 use flate2::read::GzDecoder;
-use reqwest::blocking::Client;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -18,18 +17,14 @@ const MAX_SOURCE_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// Starts the Container-local HTTP listener used by the owning Durable Object.
 pub fn serve() -> Result<(), std::io::Error> {
     let server = Server::http("0.0.0.0:8080").map_err(std::io::Error::other)?;
-    let client = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(std::io::Error::other)?;
     for mut request in server.incoming_requests() {
-        let response = handle(&mut request, &client);
+        let response = handle(&mut request);
         let _ = request.respond(response);
     }
     Ok(())
 }
 
-fn handle(request: &mut tiny_http::Request, client: &Client) -> Response<Cursor<Vec<u8>>> {
+fn handle(request: &mut tiny_http::Request) -> Response<Cursor<Vec<u8>>> {
     if request.method() == &Method::Get && request.url() == "/health" {
         return plain_response(200, "ok");
     }
@@ -57,7 +52,7 @@ fn handle(request: &mut tiny_http::Request, client: &Client) -> Response<Cursor<
         _ => return plain_response(400, "invalid materialization request"),
     };
 
-    match run_materialization(&input, body, client) {
+    match run_materialization(&input, body) {
         Ok(outcome) => json_response(200, &outcome),
         Err(error) => plain_response(503, &error.message()),
     }
@@ -66,14 +61,11 @@ fn handle(request: &mut tiny_http::Request, client: &Client) -> Response<Cursor<
 fn run_materialization(
     input: &MaterializationRequest,
     archive: Vec<u8>,
-    client: &Client,
 ) -> Result<MaterializationOutcome, MaterializationError> {
     match source_package(&archive, input) {
         Ok((files, exports)) => {
-            let mut store = HttpArtifactStore { client };
-            publish(&mut store, &input.job, files, exports)
-                .map_err(|error| MaterializationError::ArtifactPublicationUnavailable(error.to_string()))?;
-            Ok(MaterializationOutcome::Ready)
+            let uploads = publish_artifacts(input, files, exports)?;
+            Ok(MaterializationOutcome::Ready { uploads })
         }
         Err(failure) => {
             let diagnostic = failure.diagnostic(input);
@@ -87,12 +79,24 @@ fn run_materialization(
                     status_url: input.status_url.clone(),
                 },
             );
-            let mut store = HttpArtifactStore { client };
-            publish(&mut store, &input.job, tombstone.files, tombstone.exports)
-                .map_err(|error| MaterializationError::ArtifactPublicationUnavailable(error.to_string()))?;
-            Ok(MaterializationOutcome::Yanked { diagnostic })
+            let uploads = publish_artifacts(input, tombstone.files, tombstone.exports)?;
+            Ok(MaterializationOutcome::Yanked {
+                diagnostic,
+                uploads,
+            })
         }
     }
+}
+
+fn publish_artifacts(
+    input: &MaterializationRequest,
+    files: Vec<ArtifactFile>,
+    exports: BTreeMap<String, String>,
+) -> Result<Vec<BatchedArtifact>, MaterializationError> {
+    let mut store = BatchedArtifactStore::default();
+    publish(&mut store, &input.job, files, exports)
+        .map_err(|error| MaterializationError::ArtifactPublicationUnavailable(error.to_string()))?;
+    Ok(store.into_uploads())
 }
 
 fn materialization_input(
@@ -139,11 +143,13 @@ fn source_package(
     let config = parse_root_configuration(&files[config_path])
         .map_err(|error| SourceFailure::new("invalid-root-config", error.to_string(), None))?;
     if !config.imports.is_empty() {
-        return Err(SourceFailure::new(
-            "unsupported-import-map",
-            "the initial materializer cannot rewrite a source import map",
-            Some(config.exports),
-        ));
+        rewrite_source_imports(&mut files, &config.imports).map_err(|message| {
+            SourceFailure::new(
+                "unrewritable-import-map",
+                message,
+                Some(config.exports.clone()),
+            )
+        })?;
     }
     for path in config.exports.values() {
         let path = path.trim_start_matches("./");
@@ -173,6 +179,92 @@ fn source_package(
             .collect(),
         config.exports,
     ))
+}
+
+fn rewrite_source_imports(
+    files: &mut BTreeMap<String, Vec<u8>>,
+    imports: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (path, bytes) in files.iter_mut() {
+        if !matches!(
+            path.rsplit_once('.').map(|(_, extension)| extension),
+            Some("ts" | "mts" | "cts" | "tsx" | "js" | "mjs" | "cjs" | "jsx")
+        ) {
+            continue;
+        }
+        *bytes = rewrite_module_specifiers(path, bytes, imports)?.into_bytes();
+    }
+    Ok(())
+}
+
+fn rewrite_module_specifiers(
+    path: &str,
+    bytes: &[u8],
+    imports: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let source =
+        std::str::from_utf8(bytes).map_err(|_| format!("source file {path} is not UTF-8"))?;
+    let mut aliases: Vec<&str> = imports.keys().map(String::as_str).collect();
+    aliases.sort_by_key(|alias| std::cmp::Reverse(alias.len()));
+    let mut rewritten = source.to_owned();
+    for alias in aliases {
+        let replacement = rewrite_specifier(path, alias, imports);
+        if alias.ends_with('/') {
+            rewritten = rewritten.replace(&format!("\"{alias}"), &format!("\"{replacement}"));
+            rewritten = rewritten.replace(&format!("'{alias}"), &format!("'{replacement}"));
+        } else {
+            rewritten = rewritten.replace(&format!("\"{alias}\""), &format!("\"{replacement}\""));
+            rewritten = rewritten.replace(&format!("'{alias}'"), &format!("'{replacement}'"));
+        }
+    }
+    Ok(rewritten)
+}
+
+fn rewrite_specifier(
+    source_path: &str,
+    specifier: &str,
+    imports: &BTreeMap<String, String>,
+) -> String {
+    let candidate = imports
+        .iter()
+        .filter_map(|(alias, target)| {
+            let suffix = if alias.ends_with('/') {
+                specifier.strip_prefix(alias)
+            } else if specifier == alias {
+                Some("")
+            } else {
+                None
+            }?;
+            Some((alias.len(), target, suffix))
+        })
+        .max_by_key(|(length, _, _)| *length);
+    let Some((_, target, suffix)) = candidate else {
+        return specifier.to_owned();
+    };
+    if let Some(target) = target.strip_prefix("./") {
+        return relative_specifier(source_path, &format!("{target}{suffix}"));
+    }
+    format!("{target}{suffix}")
+}
+
+fn relative_specifier(source_path: &str, target_path: &str) -> String {
+    let source: Vec<&str> = source_path.split('/').collect();
+    let source_directory = &source[..source.len().saturating_sub(1)];
+    let target: Vec<&str> = target_path.split('/').collect();
+    let shared = source_directory
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut components = Vec::new();
+    components.extend(std::iter::repeat_n("..", source_directory.len() - shared));
+    components.extend(&target[shared..]);
+    let value = components.join("/");
+    if value.starts_with("..") {
+        value
+    } else {
+        format!("./{value}")
+    }
 }
 
 fn unpack_archive(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, SourceFailure> {
@@ -276,34 +368,68 @@ fn valid_source_component(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-struct HttpArtifactStore<'a> {
-    client: &'a Client,
+#[derive(Default)]
+struct BatchedArtifactStore {
+    uploads: Vec<BatchedArtifact>,
 }
 
-impl ArtifactStore for HttpArtifactStore<'_> {
+#[derive(Serialize)]
+struct BatchedArtifact {
+    key: String,
+    sha256: String,
+    body: String,
+}
+
+impl ArtifactStore for BatchedArtifactStore {
     fn put_if_absent(&mut self, key: &str, bytes: &[u8], sha256: &str) -> Result<(), StoreError> {
-        let response = self
-            .client
-            .put(format!("http://artifacts.r2/{key}"))
-            .header("x-jsrproxy-sha256", sha256)
-            .body(bytes.to_vec())
-            .send()
-            .map_err(|_| StoreError::Unavailable("artifact upload failed".to_owned()))?;
-        match response.status().as_u16() {
-            200 | 201 => Ok(()),
-            409 => Err(StoreError::ExistingObjectHasDifferentHash {
-                key: key.to_owned(),
-            }),
-            status => Err(StoreError::Unavailable(format!("artifact upload returned HTTP {status}"))),
-        }
+        self.uploads.push(BatchedArtifact {
+            key: key.to_owned(),
+            sha256: sha256.to_owned(),
+            body: base64_encode(bytes),
+        });
+        Ok(())
     }
+}
+
+impl BatchedArtifactStore {
+    fn into_uploads(self) -> Vec<BatchedArtifact> {
+        self.uploads
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+        encoded.push(ALPHABET[(first >> 2) as usize] as char);
+        encoded.push(ALPHABET[((first & 0b0000_0011) << 4 | second >> 4) as usize] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[((second & 0b0000_1111) << 2 | third >> 6) as usize] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[(third & 0b0011_1111) as usize] as char
+        } else {
+            '='
+        });
+    }
+    encoded
 }
 
 #[derive(Serialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
 enum MaterializationOutcome {
-    Ready,
-    Yanked { diagnostic: CompletionDiagnostic },
+    Ready {
+        uploads: Vec<BatchedArtifact>,
+    },
+    Yanked {
+        diagnostic: CompletionDiagnostic,
+        uploads: Vec<BatchedArtifact>,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -321,7 +447,9 @@ enum MaterializationError {
 impl MaterializationError {
     fn message(&self) -> String {
         match self {
-            Self::ArtifactPublicationUnavailable(error) => format!("artifact publication unavailable: {error}"),
+            Self::ArtifactPublicationUnavailable(error) => {
+                format!("artifact publication unavailable: {error}")
+            }
         }
     }
 }
@@ -457,5 +585,33 @@ mod tests {
             .unwrap_err();
         assert_eq!(failure.failure_class, "invalid-root-config");
         assert!(failure.message.contains("no exports"));
+    }
+
+    #[test]
+    fn rewrites_import_map_specifiers_for_external_and_internal_dependencies() {
+        let result = source_package(
+            &archive(&[
+                (
+                    "deno.json",
+                    br#"{"exports":"./src/cli/index.ts","imports":{"@std/assert":"jsr:@std/assert@1.0.19","~/":"./src/"}}"#,
+                ),
+                (
+                    "src/cli/index.ts",
+                    b"import { assert } from '@std/assert';\nimport { value } from '~/value.ts';\nexport { assert, value };\n",
+                ),
+                ("src/value.ts", b"export const value = true;\n"),
+            ]),
+            &request(),
+        )
+        .unwrap();
+        let entrypoint = result
+            .0
+            .iter()
+            .find(|file| file.path == "src/cli/index.ts")
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(&entrypoint.bytes).unwrap(),
+            "import { assert } from 'jsr:@std/assert@1.0.19';\nimport { value } from '../value.ts';\nexport { assert, value };\n"
+        );
     }
 }

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { describe, test } from "node:test";
 import { PackageDurableObject } from "../src/durable-objects.ts";
+
+const digest = (body: string) => createHash("sha256").update(body).digest("hex");
 
 class Storage {
   values = new Map<string, unknown>();
@@ -17,9 +20,28 @@ class Materializer {
     return {
       fetch: async (request: Request) => {
         this.requests.push(request);
-        return Response.json({ state: "ready" });
+        return Response.json({ state: "ready", uploads: [{
+          key: "synthetic/acme/widget/0.1.100/mod.ts",
+          sha256: digest("export const widget = true;\n"),
+          body: btoa("export const widget = true;\n"),
+        }, {
+          key: "synthetic/acme/widget/0.1.100.ready.json",
+          sha256: digest('{"manifest_sha256":"example"}'),
+          body: btoa('{"manifest_sha256":"example"}'),
+        }] });
       },
     };
+  }
+}
+
+class Bucket {
+  objects = new Map<string, { customMetadata: Record<string, string> }>();
+  async head(key: string) { return this.objects.get(key) ?? null; }
+  async put(key: string, _value: ArrayBuffer, options: { customMetadata: Record<string, string> }) {
+    if (this.objects.has(key)) return null;
+    const object = { customMetadata: options.customMetadata };
+    this.objects.set(key, object);
+    return object;
   }
 }
 
@@ -43,7 +65,7 @@ describe("package registry durable object", () => {
   test("leases a pending job to the package Container without persisting its PAT", async () => {
     const storage = new Storage();
     const materializer = new Materializer();
-    const object = new PackageDurableObject({ storage }, { MATERIALIZER: materializer });
+    const object = new PackageDurableObject({ storage }, { MATERIALIZER: materializer, ARTIFACTS: new Bucket() });
     await object.fetch(new Request("https://package.invalid/refresh", {
       method: "POST",
       body: JSON.stringify({

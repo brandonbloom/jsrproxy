@@ -53,7 +53,15 @@ const worker = {
       if (!packageAuthorization.ok) return new Response("GitHub authorization unavailable", { status: 503, headers: packageAuthorization.headers });
       if (!(await packageAuthorization.json() as { granted?: boolean }).granted) return new Response("not found", { status: 404 });
       if (isPackageMetadataPath(url.pathname)) {
-        return refreshPackageMetadata(env.PACKAGES, identity, scope.owner, repository, pat, url.origin);
+        return refreshPackageMetadata(
+          env.PACKAGES,
+          identity,
+          scope.owner,
+          repository,
+          pat,
+          url.origin,
+          request.headers.get("x-jsrproxy-recover") === "true" || url.searchParams.get("recover") === "true",
+        );
       }
       const artifact = syntheticArtifactPath(url.pathname, identity);
       if (artifact && env.ARTIFACTS) return serveArtifact(env.ARTIFACTS, artifact.versionPrefix, artifact.key, request);
@@ -92,6 +100,7 @@ async function refreshPackageMetadata(
   repository: string,
   pat: string,
   origin: string,
+  recover: boolean,
 ): Promise<Response> {
   let discovery;
   try {
@@ -111,7 +120,7 @@ async function refreshPackageMetadata(
   const response = await packages.get(packages.idFromName(`@${identity.scope}/${identity.name}`)).fetch(
     new Request("https://package.internal/refresh", {
       method: "POST",
-      body: JSON.stringify({ package: identity, discovery: { defaultBranch: discovery.defaultBranch, branches } }),
+      body: JSON.stringify({ package: identity, discovery: { defaultBranch: discovery.defaultBranch, branches }, recover }),
     }),
   );
   if (!response.ok) return new Response("package registry unavailable", { status: 503, headers: response.headers });
