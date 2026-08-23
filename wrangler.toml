@@ -12,6 +12,16 @@ class_name = "AdmissionDurableObjectV2"
 name = "PACKAGES"
 class_name = "PackageDurableObjectV2"
 
+# Kept unreferenced by Worker code during the v3-to-v4 transition so
+# Cloudflare can retire the old namespaces in v4.
+[[durable_objects.bindings]]
+name = "ADMISSION_LEGACY"
+class_name = "AdmissionDurableObject"
+
+[[durable_objects.bindings]]
+name = "PACKAGES_LEGACY"
+class_name = "PackageDurableObject"
+
 [[durable_objects.bindings]]
 name = "MATERIALIZER"
 class_name = "MaterializerContainer"
@@ -37,13 +47,11 @@ tag = "v2"
 new_sqlite_classes = ["MaterializerContainer"]
 
 # Staging has no durable state to preserve. Recreate these namespaces so the
-# SQLite-only implementation begins with no prior package or admission records.
-# The old classes stay exported without bindings only long enough for this
-# deployment's deletion migration to retire their namespaces.
+# The active bindings move to fresh SQLite-only namespaces. The unused legacy
+# bindings remain for one deployment; v4 removes them and retires their data.
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["AdmissionDurableObjectV2", "PackageDurableObjectV2"]
-deleted_classes = ["AdmissionDurableObject", "PackageDurableObject"]
 
 [env.staging]
 workers_dev = true
@@ -58,6 +66,14 @@ class_name = "AdmissionDurableObjectV2"
 [[env.staging.durable_objects.bindings]]
 name = "PACKAGES"
 class_name = "PackageDurableObjectV2"
+
+[[env.staging.durable_objects.bindings]]
+name = "ADMISSION_LEGACY"
+class_name = "AdmissionDurableObject"
+
+[[env.staging.durable_objects.bindings]]
+name = "PACKAGES_LEGACY"
+class_name = "PackageDurableObject"
 
 [[env.staging.durable_objects.bindings]]
 name = "MATERIALIZER"
